@@ -58,7 +58,7 @@ layout behaviour.
 -}
 
 newtype WeightedStack = WS Fixed
-  deriving(GObjectClass, ObjectClass, WidgetClass,ContainerClass)
+  deriving(GObjectClass, WidgetClass,ContainerClass)
 
 type StackDescr = [(Widget, RelativeSize)]
 
@@ -140,7 +140,7 @@ constant even when resizing.
 -}
 
 newtype SlidingPair = SP Paned
-  deriving(GObjectClass, ObjectClass, WidgetClass, ContainerClass)
+  deriving(GObjectClass, WidgetClass, ContainerClass)
 
 slidingPairNew :: (WidgetClass w1, WidgetClass w2) => Orientation -> w1 -> w2 -> DividerPosition -> (DividerPosition -> IO ()) -> IO SlidingPair
 slidingPairNew o w1 w2 pos handleNewPos = do
@@ -381,7 +381,7 @@ simpleNotebookSet sn ts = do
 
 -- | The 'onSwitchPage' callback
 simpleNotebookOnSwitchPage :: SimpleNotebook -> (Int -> IO ()) -> IO ()
-simpleNotebookOnSwitchPage sn cb = void $ onSwitchPage (snMainWidget sn) cb
+simpleNotebookOnSwitchPage sn cb = void $ Gtk.on (snMainWidget sn) switchPage cb
 
 
 ------------------- Utils

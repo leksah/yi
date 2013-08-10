@@ -21,10 +21,8 @@ import qualified Data.Map as M
 import qualified Data.Rope as Rope
 
 import Graphics.UI.Gtk hiding (Region, Window, Action, Point, Style, Modifier, on)
-import Graphics.UI.Gtk.Gdk.GC hiding (foreground)
 import qualified Graphics.UI.Gtk.Gdk.EventM as EventM
 import qualified Graphics.UI.Gtk as Gtk
-import qualified Graphics.UI.Gtk.Gdk.GC as Gtk
 import System.Glib.GError
 
 import Yi.Prelude hiding (on)
@@ -48,6 +46,11 @@ import Yi.UI.Utils
 #ifdef GNOME_ENABLED
 import Yi.UI.Pango.Gnome(watchSystemFont)
 #endif
+
+import Graphics.Rendering.Cairo.Internal (Render(..))
+import Graphics.Rendering.Pango.Cairo (showLayout)
+import qualified Graphics.Rendering.Cairo as Cairo (moveTo, lineTo, rectangle)
+import Control.Monad.Reader (ask, liftIO)
 
 -- We use IORefs in all of these datatypes for all fields which could
 -- possibly change over time.  This ensures that no 'UI', 'TabInfo',
@@ -87,7 +90,7 @@ data WinInfo = WinInfo
     { coreWinKey      :: WindowRef
     , coreWin         :: IORef Window
     , shownTos        :: IORef Point
-    , lButtonPressed  :: IORef Bool 
+    , lButtonPressed  :: IORef Bool
     , insertingMode   :: IORef Bool
     , inFocus         :: IORef Bool
     , winLayoutInfo   :: MVar WinLayoutInfo
@@ -154,9 +157,9 @@ startNoMsg cfg ch outCh ed = do
   win   <- windowNew
   ico   <- loadIcon "yi+lambda-fat-32.png"
   vb    <- vBoxNew False 1    -- Top-level vbox
-    
+
   im <- imMulticontextNew
-  imContextSetUsePreedit im False  -- handler for preedit string not implemented  
+  imContextSetUsePreedit im False  -- handler for preedit string not implemented
   im `on` imContextCommit $ mapM_ (\k -> ch $ Event (KASCII k) [])  -- Yi.Buffer.Misc.insertN for atomic input?
 
   set win [ windowDefaultWidth  := 700
@@ -167,7 +170,7 @@ startNoMsg cfg ch outCh ed = do
           ]
   win `on` deleteEvent $ io $ mainQuit >> return True
   win `on` keyPressEvent $ handleKeypress ch im
-  
+
   paned <- hPanedNew
   tabs <- simpleNotebookNew
   panedAdd2 paned (baseWidget tabs)
@@ -278,7 +281,7 @@ setWindowFocus e ui t w = do
   update (modeline w) labelText ml
   writeIORef (fullTitle t) bufferName
   writeIORef (abbrevTitle t) (tabAbbrevTitle bufferName)
-  drawW <- catch (fmap Just $ widgetGetDrawWindow $ textview w)
+  drawW <- catch (widgetGetWindow $ textview w)
                  (\(_ :: SomeException) -> return Nothing)
   imContextSetClientWindow im drawW
   imContextFocusIn im
@@ -394,10 +397,10 @@ newWindow e ui w = do
     v `on` scrollEvent        $ handleScroll        ui win
     v `on` configureEvent     $ handleConfigure     ui  -- todo: allocate event rather than configure?
     v `on` motionNotifyEvent  $ handleMove          ui win
-    discard $ v `onExpose` render ui win
+    discard $ v `on` draw $ render ui win
     -- also redraw when the window receives/loses focus
-    (uiWindow ui) `on` focusInEvent $ io (widgetQueueDraw v) >> return False 
-    (uiWindow ui) `on` focusOutEvent $ io (widgetQueueDraw v) >> return False 
+    (uiWindow ui) `on` focusInEvent $ io (widgetQueueDraw v) >> return False
+    (uiWindow ui) `on` focusOutEvent $ io (widgetQueueDraw v) >> return False
     -- todo: consider adding an 'isDirty' flag to WinLayoutInfo,
     -- so that we don't have to recompute the Attributes when focus changes.
     return win
@@ -428,8 +431,10 @@ updateWinInfoForRendering e _ui w = modifyMVar_ (winLayoutInfo w) $ \wli -> do
   return $! wli{buffer=findBufferWith (bufkey win) e,regex=currentRegex e}
 
 -- | Tell the 'PangoLayout' what colours to draw, and draw the 'PangoLayout' and the cursor onto the screen
-render :: UI -> WinInfo -> t -> IO Bool
-render ui w _event = withMVar (winLayoutInfo w) $ \WinLayoutInfo{winLayout=layout,tos,bos,cur,buffer=b,regex} -> do
+render :: UI -> WinInfo -> Render ()
+render ui w = do
+ cr <- ask
+ liftIO $ withMVar (winLayoutInfo w) $ \WinLayoutInfo{winLayout=layout,tos,bos,cur,buffer=b,regex} -> do
   -- read the information
   win <- readIORef (coreWin w)
 
@@ -450,12 +455,9 @@ render ui w _event = withMVar (winLayoutInfo w) $ \WinLayoutInfo{winLayout=layou
 
   layoutSetAttributes layout allAttrs
 
-  drawWindow <- widgetGetDrawWindow $ textview w
-  gc <- gcNew drawWindow
-
   -- see Note [PangoLayout width]
   -- draw the layout
-  drawLayout drawWindow gc 1 0 layout
+  runReaderT (runRender $ showLayout layout) cr
 
   -- calculate the cursor position
   im <- readIORef (insertingMode w)
@@ -464,29 +466,31 @@ render ui w _event = withMVar (winLayoutInfo w) $ \WinLayoutInfo{winLayout=layou
   bufferFocused <- readIORef (inFocus w)
   uiFocused <- Gtk.windowHasToplevelFocus (uiWindow ui)
   let focused = bufferFocused && uiFocused
-      wideCursor = 
+      wideCursor =
        case configCursorStyle (uiConfig ui) of
          AlwaysFat -> True
          NeverFat -> False
          FatWhenFocused -> focused
          FatWhenFocusedAndInserting -> focused && im
- 
+
 
   (PangoRectangle (succ -> curX) curY curW curH, _) <- layoutGetCursorPos layout (rel cur)
   -- tell the input method
   imContextSetCursorLocation (uiInput ui) (Rectangle (round curX) (round curY) (round curW) (round curH))
   -- paint the cursor
-  gcSetValues gc (newGCValues { Gtk.foreground = mkCol True $ Yi.Style.foreground $ baseAttributes $ configStyle $ uiConfig ui,
-                                Gtk.lineWidth = if wideCursor then 2 else 1 })
+--  gcSetValues gc (newGCValues { Gtk.foreground = mkCol True $ Yi.Style.foreground $ baseAttributes $ configStyle $ uiConfig ui,
+--                                Gtk.lineWidth = if wideCursor then 2 else 1 })
   -- tell the renderer
-  if im 
-  then -- if we are inserting, we just want a line
-    drawLine drawWindow gc (round curX, round curY) (round $ curX + curW, round $ curY + curH)
-  else do -- if we aren't inserting, we want a rectangle around the current character
-    PangoRectangle (succ -> chx) chy chw chh <- layoutIndexToPos layout (rel cur)
-    drawRectangle drawWindow gc False (round chx) (round chy) (if chw > 0 then round chw else 8) (round chh)
+  (`runReaderT` cr) . runRender $
+      if im
+      then do -- if we are inserting, we just want a line
+        Cairo.moveTo curX curY
+        Cairo.lineTo (curX + curW) (curY + curH)
+      else do -- if we aren't inserting, we want a rectangle around the current character
+        PangoRectangle (succ -> chx) chy chw chh <- liftIO $ layoutIndexToPos layout (rel cur)
+        Cairo.rectangle chx chy (if chw > 0 then chw else 8) chh
 
-  return True
+  return ()
 
 doLayout :: UI -> Editor -> IO Editor
 doLayout ui e = do
@@ -507,7 +511,7 @@ getHeightsInTab :: UI -> FontDescription -> Editor -> TabInfo -> IO (M.Map Windo
 getHeightsInTab ui f e tab = do
   wCache <- readIORef (windowCache tab)
   forM wCache $ \wi -> do
-    (_, h) <- widgetGetSize $ textview wi
+    h <- widgetGetAllocatedHeight $ textview wi
     win <- readIORef (coreWin wi)
     let metrics = winMetrics wi
         lineHeight = ascent metrics + descent metrics
@@ -528,7 +532,7 @@ Note [PangoLayout width]
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 We start rendering the PangoLayout one pixel from the left of the rendering area, which means a few +/-1 offsets in Pango rendering and point lookup code.
-The reason for this is to support the "wide cursor", which is 2 pixels wide. If we started rendering the PangoLayout 
+The reason for this is to support the "wide cursor", which is 2 pixels wide. If we started rendering the PangoLayout
 directly from the left of the rendering area instead of at a 1-pixel offset, then the "wide cursor" would only be half-displayed
 when the cursor is at the beginning of the line, and would then be a "thin cursor".
 
@@ -543,7 +547,8 @@ Reiner
 -- updateWinInfoForRendering.
 updatePango :: UI -> FontDescription -> WinInfo -> FBuffer -> PangoLayout -> IO (Point, Point, Point, Point)
 updatePango ui font w b layout = do
-  (width_', height') <- widgetGetSize $ textview w
+  width_' <- widgetGetAllocatedWidth $ textview w
+  height' <- widgetGetAllocatedHeight $ textview w
   let width' = max 0 (width_' - 1) -- see Note [PangoLayout width]
 
   oldFont <- layoutGetFontDescription layout
@@ -610,7 +615,7 @@ handleKeypress ch im = do
       key  = case char of
         Just c  -> Just $ KASCII c
         Nothing -> M.lookup (keyName gtkKey) keyTable
-  
+
   case (ifIM, key) of
     (True, _   ) -> return ()
     (_, Nothing) -> logPutStrLn $ "Event not translatable: " ++ show key
@@ -637,7 +642,7 @@ keyTable = M.fromList
     ,("ISO_Left_Tab", KTab)
     ]
 
--- | Map Yi modifiers to GTK 
+-- | Map Yi modifiers to GTK
 modTable :: M.Map Modifier EventM.Modifier
 modTable = M.fromList
     [ (MShift, EventM.Shift  )
@@ -659,10 +664,10 @@ handleButtonClick ui ref = do
   io $ do
     w <- getWinInfo ui ref
     point <- pointToOffset (x, y) w
-    
+
     let focusWindow = focusWindowE ref
         runAction = uiActionCh ui . makeAction
-    
+
     runAction focusWindow
     case (click, button) of
       (SingleClick, LeftButton) ->  do
@@ -676,7 +681,7 @@ handleButtonClick ui ref = do
             moveTo point
             setVisibleSelection False
       _ -> return ()
-    
+
     return True
 
 handleButtonRelease :: UI -> WinInfo -> EventM EButton Bool
@@ -719,7 +724,7 @@ handleConfigure ui = do
   -- why does this cause a hang without postGUIAsync?
   io $ postGUIAsync $ uiActionCh ui (makeAction (return () :: EditorM()))
   return False -- allow event to be propagated
-  
+
 handleMove :: UI -> WinInfo -> EventM EMotion Bool
 handleMove ui w = eventCoordinates >>= (io . selectArea ui w) >>
                   return True
@@ -743,7 +748,7 @@ selectArea ui w (x,y) = do
           setVisibleSelection True
           readRegionB =<< getSelectRegionB
         setRegE txt
-  
+
   uiActionCh ui (makeAction editorAction)
   -- drawWindowGetPointer (textview w) -- be ready for next message.
 
@@ -769,10 +774,10 @@ setSelectionClipboard ui _w cb = do
         io $ writeIORef selection txt
   uiActionCh ui $ makeAction yiAction
   txt <- readIORef selection
-  
+
   if (not . null) txt
     then clipboardSetText cb txt
-    else return () 
+    else return ()
 
 
 

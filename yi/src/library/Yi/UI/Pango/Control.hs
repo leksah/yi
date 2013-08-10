@@ -55,9 +55,8 @@ import Graphics.UI.Gtk as Gtk
        (Color(..), PangoRectangle(..), Rectangle(..), selectionDataSetText,
         targetString, clipboardSetWithData, clipboardRequestText,
         selectionPrimary, clipboardGetForDisplay, widgetGetDisplay,
-        onMotionNotify, drawRectangle, drawLine, 
-        layoutIndexToPos, layoutGetCursorPos, drawLayout,
-        widgetGetDrawWindow, layoutSetAttributes, widgetGrabFocus,
+        layoutIndexToPos, layoutGetCursorPos,
+        layoutSetAttributes, widgetGrabFocus,
         scrolledWindowSetPolicy, scrolledWindowAddWithViewport,
         scrolledWindowNew, contextGetMetrics, contextGetLanguage,
         layoutSetFontDescription, layoutEmpty, widgetCreatePangoContext,
@@ -65,12 +64,10 @@ import Graphics.UI.Gtk as Gtk
         FontMetrics, Language, DrawingArea, layoutXYToIndex, layoutSetText,
         layoutGetText, widgetSetSizeRequest, layoutGetPixelExtents,
         layoutSetWidth, layoutGetWidth, layoutGetFontDescription,
-        PangoLayout, descent, ascent, widgetGetSize, widgetQueueDraw,
+        PangoLayout, descent, ascent, widgetQueueDraw,
         mainQuit, signalDisconnect, ConnectId(..), PolicyType(..),
         StateType(..), EventMask(..), AttrOp(..), Weight(..),
         PangoAttribute(..), Underline(..), FontStyle(..))
-import Graphics.UI.Gtk.Gdk.GC as Gtk
-	(newGCValues, gcSetValues, gcNew, foreground)
 import qualified Graphics.UI.Gtk as Gtk
 import qualified Graphics.UI.Gtk.Gdk.Events as Gdk.Events
 import System.Glib.GError
@@ -83,6 +80,8 @@ import qualified Data.List.PointedList as  PL (insertRight, withFocus, PointedLi
 import Yi.Regex
 import System.FilePath
 import qualified Yi.UI.Common as Common
+import Graphics.Rendering.Pango.Cairo (showLayout)
+import qualified Graphics.Rendering.Cairo as Cairo (moveTo, lineTo, rectangle)
 
 data Control = Control
     { controlYi :: Yi
@@ -237,7 +236,7 @@ getHeightsInTab e tab = do
   foldlM (\a w -> do
         case Map.lookup (wkey w) vs of
             Just v -> do
-                (_, h) <- liftIO $ widgetGetSize $ drawArea v
+                h <- liftIO $ Gtk.widgetGetAllocatedHeight $ drawArea v
                 let lineHeight = ascent (metrics v) + descent (metrics v)
                 let b0 = findBufferWith (viewFBufRef v) e
                 rgn <- shownRegion e v b0
@@ -253,7 +252,8 @@ shownRegion e v b = do
 
 updatePango :: Editor -> View -> FBuffer -> PangoLayout -> ControlM (Point, Point, Point)
 updatePango e v b layout = do
-  (width', height') <- liftIO $ widgetGetSize $ drawArea v
+  width'  <- liftIO $ Gtk.widgetGetAllocatedWidth  $ drawArea v
+  height' <- liftIO $ Gtk.widgetGetAllocatedHeight $ drawArea v
 
   font <- liftIO $ layoutGetFontDescription layout
 
@@ -485,28 +485,36 @@ newView buffer font = do
     liftIO $ Gtk.widgetAddEvents drawArea [KeyPressMask]
     liftIO $ Gtk.set drawArea [Gtk.widgetCanFocus := True]
 
-    liftIO $ drawArea `Gtk.onKeyPress` \event -> do
-        putStrLn $ "Yi Control Key Press = " ++ show event
-        runControl (do
+    liftIO $ Gtk.on drawArea Gtk.keyPressEvent $ do
+        -- putStrLn $ "Yi Control Key Press = " ++ show event
+        liftIO $ runControl (do
             runAction $ makeAction $ do
                 focusWindowE windowRef
                 switchToBufferE viewFBufRef) control
-        result <- processEvent (input $ controlYi control) event
-        widgetQueueDraw drawArea
+        result <- processKeyEvent (input $ controlYi control)
+        liftIO $ widgetQueueDraw drawArea
         return result
 
-    liftIO $ drawArea `Gtk.onButtonPress` \event -> do
-        widgetGrabFocus drawArea
-        runControl (handleClick view event) control
+    liftIO $ Gtk.on drawArea Gtk.buttonPressEvent $ do
+        (x, y) <- Gtk.eventCoordinates
+        click <- Gtk.eventClick
+        button <- Gtk.eventButton
+        liftIO $ do
+            widgetGrabFocus drawArea
+            runControl (handleClick view x y click button) control
 
-    liftIO $ drawArea `Gtk.onButtonRelease` \event -> do
-        runControl (handleClick view event) control
+    liftIO $ Gtk.on drawArea Gtk.buttonReleaseEvent $ do
+        (x, y) <- Gtk.eventCoordinates
+        click <- Gtk.eventClick
+        button <- Gtk.eventButton
+        liftIO $ runControl (handleClick view x y click button) control
 
-    liftIO $ drawArea `Gtk.onScroll` \event -> do
-        runControl (handleScroll view event) control
+    liftIO $ Gtk.on drawArea Gtk.scrollEvent $ do
+        direction <- Gtk.eventScrollDirection
+        liftIO $ runControl (handleScroll view direction) control
 
-    liftIO $ drawArea `Gtk.onExpose` \event -> do
-        (text, allAttrs, debug, tos, rel, point, inserting) <- runControl (liftYi $ withEditor $ do
+    liftIO $ Gtk.on drawArea Gtk.draw $ do
+        (text, allAttrs, debug, tos, rel, point, inserting) <- liftIO $ runControl (liftYi $ withEditor $ do
             window <- (findWindowWith windowRef) <$> get
             modA buffersA (fmap (clearSyntax . clearHighlight))
             let winh = height window
@@ -552,25 +560,28 @@ newView buffer font = do
                 return (text, allAttrs, (picture, strokes, modeNm, window, tos, bos, winh), tos, rel, point, inserting)) control
 
         -- putStrLn $ "Setting Layout Attributes " ++ show debug
-        layoutSetAttributes layout allAttrs
-        -- putStrLn "Done Stting Layout Attributes"
-        dw      <- widgetGetDrawWindow drawArea
-        gc      <- gcNew dw
-        oldText <- layoutGetText layout
-        when (text /= oldText) $ layoutSetText layout text
-        drawLayout dw gc 0 0 layout
+        liftIO $ do
+            layoutSetAttributes layout allAttrs
+            -- putStrLn "Done Stting Layout Attributes"
+            -- dw      <- widgetGetDrawWindow drawArea
+            -- gc      <- gcNew dw
+            oldText <- layoutGetText layout
+            when (text /= oldText) $ layoutSetText layout text
+        showLayout layout
         liftIO $ writeRef shownTos tos
 
         -- paint the cursor
-        (PangoRectangle curx cury curw curh, _) <- layoutGetCursorPos layout (rel point)
-        PangoRectangle chx chy chw chh          <- layoutIndexToPos layout (rel point)
+        (PangoRectangle curx cury curw curh, _) <- liftIO $ layoutGetCursorPos layout (rel point)
+        PangoRectangle chx chy chw chh          <- liftIO $ layoutIndexToPos layout (rel point)
 
-        gcSetValues gc (newGCValues { Gtk.foreground = mkCol True $ Yi.Style.foreground $ baseAttributes $ configStyle $ configUI config })
+        -- gcSetValues gc (newGCValues { Gtk.foreground = mkCol True $ Yi.Style.foreground $ baseAttributes $ configStyle $ configUI config })
         if inserting
-            then do drawLine dw gc (round curx, round cury) (round $ curx + curw, round $ cury + curh)
-            else do drawRectangle dw gc False (round chx) (round chy) (if chw > 0 then round chw else 8) (round chh)
+            then do
+                Cairo.moveTo curx cury
+                Cairo.lineTo (curx + curw) (cury + curh)
+            else do Cairo.rectangle chx chy (if chw > 0 then chw else 8) chh
 
-        return True
+        return ()
 
     liftIO $ widgetGrabFocus drawArea
 
@@ -639,17 +650,15 @@ mkCol _ (RGB x y z) = Color (fromIntegral x * 256)
                             (fromIntegral y * 256)
                             (fromIntegral z * 256)
 
-handleClick :: View -> Gdk.Events.Event -> ControlM Bool
-handleClick view event = do
+handleClick :: View -> Double -> Double -> Gtk.Click -> Gtk.MouseButton -> ControlM Bool
+handleClick view x y click button = do
   control  <- ask
   -- (_tabIdx,winIdx,w) <- getWinInfo ref <$> readIORef (tabCache ui)
 
-  logPutStrLn $ "Click: " ++ show (Gdk.Events.eventX event,
-                                   Gdk.Events.eventY event,
-                                   Gdk.Events.eventClick event)
+  logPutStrLn $ "Click: " ++ show (x, y, click)
 
   -- retrieve the clicked offset.
-  (_,layoutIndex,_) <- io $ layoutXYToIndex (layout view) (Gdk.Events.eventX event) (Gdk.Events.eventY event)
+  (_,layoutIndex,_) <- io $ layoutXYToIndex (layout view) x y
   tos <- readRef (shownTos view)
   let p1 = tos + fromIntegral layoutIndex
 
@@ -662,25 +671,26 @@ handleClick view event = do
       -- TODO: check that tabIdx is the focus?
 --      modA windowsA (fromJust . PL.move winIdx)
 
-  liftIO $ case (Gdk.Events.eventClick event, Gdk.Events.eventButton event) of
-     (Gdk.Events.SingleClick, Gdk.Events.LeftButton) -> do
-        cid <- onMotionNotify (drawArea view) False $ \event -> do
-            runControl (handleMove view p1 event) control
+  liftIO $ case (click, button) of
+     (Gtk.SingleClick, Gtk.LeftButton) -> do
+        cid <- Gtk.on (drawArea view) Gtk.motionNotifyEvent $ do
+            (x, y) <- Gtk.eventCoordinates
+            liftIO $ runControl (handleMove view p1 x y) control
         writeRef (winMotionSignal view) $ Just cid
 
      _ -> do maybe (return ()) signalDisconnect =<< readRef (winMotionSignal view)
              writeRef (winMotionSignal view) Nothing
 
-  case (Gdk.Events.eventClick event, Gdk.Events.eventButton event) of
-    (Gdk.Events.SingleClick, Gdk.Events.LeftButton) -> runAction . makeAction $ do
+  case (click, button) of
+    (Gtk.SingleClick, Gtk.LeftButton) -> runAction . makeAction $ do
         -- b <- gets $ (bkey . findBufferWith (viewFBufRef view))
         -- focusWindow
         window <- (findWindowWith winRef) <$> get
         withGivenBufferAndWindow0 window (viewFBufRef view) $ do
             moveTo p1
             setVisibleSelection False
-    -- (Gdk.Events.SingleClick, _) -> runAction focusWindow
-    (Gdk.Events.ReleaseClick, Gdk.Events.MiddleButton) -> do
+    -- (Gtk.SingleClick, _) -> runAction focusWindow
+    (Gtk.ReleaseClick, Gtk.MiddleButton) -> do
         disp <- liftIO $ widgetGetDisplay (drawArea view)
         cb <- liftIO $ clipboardGetForDisplay disp selectionPrimary
         let cbHandler Nothing = return ()
@@ -696,24 +706,24 @@ handleClick view event = do
   liftIO $ widgetQueueDraw (drawArea view)
   return True
 
-handleScroll :: View -> Gdk.Events.Event -> ControlM Bool
-handleScroll view event = do
+handleScroll :: View -> Gtk.ScrollDirection -> ControlM Bool
+handleScroll view direction = do
   let editorAction = do
-        withBuffer0 $ vimScrollB $ case Gdk.Events.eventDirection event of
-                        Gdk.Events.ScrollUp   -> (-1)
-                        Gdk.Events.ScrollDown -> 1
+        withBuffer0 $ vimScrollB $ case direction of
+                        Gtk.ScrollUp   -> (-1)
+                        Gtk.ScrollDown -> 1
                         _ -> 0 -- Left/right scrolling not supported
 
   runAction $ makeAction editorAction
   liftIO $ widgetQueueDraw (drawArea view)
   return True
 
-handleMove :: View -> Point -> Gdk.Events.Event -> ControlM Bool
-handleMove view p0 event = do
-  logPutStrLn $ "Motion: " ++ show (Gdk.Events.eventX event, Gdk.Events.eventY event)
+handleMove :: View -> Point -> Double -> Double -> ControlM Bool
+handleMove view p0 x y = do
+  logPutStrLn $ "Motion: " ++ show (x, y)
 
   -- retrieve the clicked offset.
-  (_,layoutIndex,_) <- liftIO $ layoutXYToIndex (layout view) (Gdk.Events.eventX event) (Gdk.Events.eventY event)
+  (_,layoutIndex,_) <- liftIO $ layoutXYToIndex (layout view) x y
   tos <- readRef (shownTos view)
   let p1 = tos + fromIntegral layoutIndex
 
@@ -750,27 +760,29 @@ handleMove view p0 event = do
   liftIO $ widgetQueueDraw (drawArea view)
   return True
 
-processEvent :: (Event -> IO ()) -> Gdk.Events.Event -> IO Bool
-processEvent ch ev = do
+processKeyEvent :: (Event -> IO ()) -> Gtk.EventM Gtk.EKey Bool
+processKeyEvent ch = do
   -- logPutStrLn $ "Gtk.Event: " ++ show ev
   -- logPutStrLn $ "Event: " ++ show (gtkToYiEvent ev)
-  case gtkToYiEvent ev of
-    Nothing -> logPutStrLn $ "Event not translatable: " ++ show ev
-    Just e -> ch e
+  name <- Gtk.eventKeyName
+  mod <- Gtk.eventModifier
+  char <- Gtk.eventKeyVal >>= liftIO . Gtk.keyvalToChar
+  case gtkToYiEvent name mod char of
+    Nothing -> logPutStrLn $ "Event not translatable: " ++ show (name, mod, char)
+    Just e -> liftIO $ ch e
   return True
 
-gtkToYiEvent :: Gdk.Events.Event -> Maybe Event
-gtkToYiEvent (Gdk.Events.Key {Gdk.Events.eventKeyName = key, Gdk.Events.eventModifier = evModifier, Gdk.Events.eventKeyChar = char})
+gtkToYiEvent :: String -> [Gtk.Modifier] -> Maybe Char -> Maybe Event
+gtkToYiEvent key evModifier char
     = fmap (\k -> Event k $ (nub $ (if isShift then filter (/= MShift) else id) $ concatMap modif evModifier)) key'
       where (key',isShift) =
                 case char of
                   Just c -> (Just $ KASCII c, True)
                   Nothing -> (Map.lookup key keyTable, False)
-            modif Gdk.Events.Control = [MCtrl]
-            modif Gdk.Events.Alt = [MMeta]
-            modif Gdk.Events.Shift = [MShift]
+            modif Gtk.Control = [MCtrl]
+            modif Gtk.Alt = [MMeta]
+            modif Gtk.Shift = [MShift]
             modif _ = []
-gtkToYiEvent _ = Nothing
 
 -- | Map GTK long names to Keys
 keyTable :: Map.Map String Key

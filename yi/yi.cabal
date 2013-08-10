@@ -228,7 +228,7 @@ library
     regex-base ==0.93.*,
     regex-tdfa == 1.1.*,
     split >= 0.1 && < 0.3,
-    template-haskell >= 2.4 && < 2.9,
+    template-haskell >= 2.4 && < 2.10,
     time >= 1.1 && < 1.5,
     utf8-string >= 0.3.1,
     uniplate,
@@ -289,16 +289,17 @@ library
       Yi.UI.Pango.Layouts
       Yi.UI.Pango.Utils
     build-depends:
-      gtk ==0.12.*,
+      gtk3 ==0.12.*,
       glib ==0.12.*,
-      pango ==0.12.*
+      pango ==0.12.*,
+      cairo ==0.12.*
     cpp-options: -DFRONTEND_PANGO
 
   if flag(vte)
     exposed-modules:
       Yi.UI.Vte
     build-depends:
-      gtk ==0.12.*,
+      gtk3 ==0.12.*,
       glib ==0.12.*,
       pango ==0.12.*,
       vte ==0.12.*,
