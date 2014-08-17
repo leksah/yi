@@ -73,7 +73,7 @@ layout behaviour.
 -}
 
 newtype WeightedStack = WS Fixed
-  deriving(GObjectClass, ObjectClass, WidgetClass,ContainerClass)
+  deriving(GObjectClass, WidgetClass,ContainerClass)
 
 type StackDescr = [(Widget, RelativeSize)]
 
@@ -161,7 +161,7 @@ constant even when resizing.
 -}
 
 newtype SlidingPair = SP Paned
-  deriving(GObjectClass, ObjectClass, WidgetClass, ContainerClass)
+  deriving(GObjectClass, WidgetClass, ContainerClass)
 
 slidingPairNew :: (WidgetClass w1, WidgetClass w2) => Orientation -> w1 -> w2
                -> DividerPosition

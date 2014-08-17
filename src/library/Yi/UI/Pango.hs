@@ -39,8 +39,6 @@ import qualified Graphics.UI.Gtk as Gtk
 import           Graphics.UI.Gtk hiding (Region, Window, Action , Point,
                                          Style, Modifier, on)
 import qualified Graphics.UI.Gtk.Gdk.EventM as EventM
-import qualified Graphics.UI.Gtk.Gdk.GC as Gtk
-import           Graphics.UI.Gtk.Gdk.GC hiding (foreground)
 import           Prelude hiding (error, elem, mapM_, foldl, concat, mapM)
 import           System.Glib.GError
 import           Yi.Buffer
@@ -67,6 +65,11 @@ import           Yi.UI.TabBar
 import           Yi.UI.Utils
 import           Yi.Utils
 import           Yi.Window
+
+import Graphics.Rendering.Cairo.Internal (Render(..))
+import Graphics.Rendering.Pango.Cairo (showLayout)
+import qualified Graphics.Rendering.Cairo as Cairo (moveTo, lineTo, rectangle, setSourceRGB, setLineWidth, Render)
+import Control.Monad.Reader (ask, liftIO, runReaderT)
 
 -- We use IORefs in all of these datatypes for all fields which could
 -- possibly change over time.  This ensures that no 'UI', 'TabInfo',
@@ -329,7 +332,7 @@ setWindowFocus e ui t w = do
   update (modeline w) labelText ml
   writeIORef (fullTitle t) bufferName
   writeIORef (abbrevTitle t) (tabAbbrevTitle bufferName)
-  drawW <- catch (fmap Just $ widgetGetDrawWindow $ textview w)
+  drawW <- catch (widgetGetWindow $ textview w)
                  (\(_ :: SomeException) -> return Nothing)
   imContextSetClientWindow im drawW
   imContextFocusIn im
@@ -457,7 +460,7 @@ newWindow e ui w = do
     v `on` configureEvent     $ handleConfigure     ui
 
     v `on` motionNotifyEvent  $ handleMove          ui win
-    void $ v `onExpose` render ui win
+    void $ v `on` draw $ render ui win
     -- also redraw when the window receives/loses focus
     uiWindow ui `on` focusInEvent $ io (widgetQueueDraw v) >> return False
     uiWindow ui `on` focusOutEvent $ io (widgetQueueDraw v) >> return False
@@ -492,10 +495,10 @@ updateWinInfoForRendering e _ui w = modifyMVar_ (winLayoutInfo w) $ \wli -> do
 
 -- | Tell the 'PangoLayout' what colours to draw, and draw the 'PangoLayout'
 -- and the cursor onto the screen
-render :: UI -> WinInfo -> t -> IO Bool
-render ui w _event =
-  withMVar (winLayoutInfo w) $
-  \WinLayoutInfo{winLayout=layout,tos,bos,cur,buffer=b,regex} -> do
+render :: UI -> WinInfo -> Render ()
+render ui w = do
+  cr <- ask
+  liftIO $ withMVar (winLayoutInfo w) $ \WinLayoutInfo{winLayout=layout,tos,bos,cur,buffer=b,regex} -> do
     -- read the information
     win <- readIORef (coreWin w)
 
@@ -522,12 +525,9 @@ render ui w _event =
 
     layoutSetAttributes layout allAttrs
 
-    drawWindow <- widgetGetDrawWindow $ textview w
-    gc <- gcNew drawWindow
-
     -- see Note [PangoLayout width]
     -- draw the layout
-    drawLayout drawWindow gc 1 0 layout
+    runReaderT (runRender $ showLayout layout) cr
 
     -- calculate the cursor position
     im <- readIORef (insertingMode w)
@@ -550,26 +550,24 @@ render ui w _event =
     imContextSetCursorLocation (uiInput ui) $
       Rectangle (round curX) (round curY) (round curW) (round curH)
     -- paint the cursor
-    gcSetValues gc
-      (newGCValues { Gtk.foreground = mkCol True . Yi.Style.foreground
-                                      . baseAttributes . configStyle $
-                                      uiConfig ui
-                   , Gtk.lineWidth = if wideCursor then 2 else 1 })
-
+--    gcSetValues gc
+--      (newGCValues { Gtk.foreground = mkCol True . Yi.Style.foreground
+--                                      . baseAttributes . configStyle $
+--                                      uiConfig ui
+--                   , Gtk.lineWidth = if wideCursor then 2 else 1 })
     -- tell the renderer
-    if im
-      then  -- if we are inserting, we just want a line
-      drawLine drawWindow gc (round curX, round curY)
-      (round $ curX + curW, round $ curY + curH)
+    (`runReaderT` cr) . runRender $ do
+      sourceCol True $ Yi.Style.foreground $ baseAttributes $ configStyle $ uiConfig ui
+      Cairo.setLineWidth $ if wideCursor then 2 else 1
+      if im
+        then do -- if we are inserting, we just want a line
+          Cairo.moveTo curX curY
+          Cairo.lineTo (curX + curW) (curY + curH)
+        else do -- if we aren't inserting, we want a rectangle around the current character
+          PangoRectangle (succ -> chx) chy chw chh <- liftIO $ layoutIndexToPos layout (rel cur)
+          Cairo.rectangle chx chy (if chw > 0 then chw else 8) chh
 
-      -- we aren't inserting, we want a rectangle around the current character
-      else do
-      PangoRectangle (succ -> chx) chy chw chh <- layoutIndexToPos
-                                                  layout (rel cur)
-      drawRectangle drawWindow gc False (round chx) (round chy)
-        (if chw > 0 then round chw else 8) (round chh)
-
-    return True
+    return ()
 
 doLayout :: UI -> Editor -> IO Editor
 doLayout ui e = do
@@ -592,7 +590,8 @@ getDimensionsInTab :: UI -> FontDescription -> Editor
 getDimensionsInTab ui f e tab = do
   wCache <- readIORef (windowCache tab)
   forM wCache $ \wi -> do
-    (wid, h) <- widgetGetSize $ textview wi
+    wid <- widgetGetAllocatedWidth $ textview wi
+    h <- widgetGetAllocatedHeight $ textview wi
     win <- readIORef (coreWin wi)
     let metrics = winMetrics wi
         lineHeight = ascent metrics + descent metrics
@@ -636,7 +635,8 @@ Reiner
 updatePango :: UI -> FontDescription -> WinInfo -> FBuffer
             -> PangoLayout -> IO (Point, Point, Point, Point)
 updatePango ui font w b layout = do
-  (width_', height') <- widgetGetSize $ textview w
+  width_' <- widgetGetAllocatedWidth $ textview w
+  height' <- widgetGetAllocatedHeight $ textview w
   let width' = max 0 (width_' - 1) -- see Note [PangoLayout width]
       fontDescriptionToStringT :: FontDescription -> IO Text
       fontDescriptionToStringT = fontDescriptionToString
@@ -773,6 +773,14 @@ mkCol False Default = Color maxBound maxBound maxBound
 mkCol _ (RGB x y z) = Color (fromIntegral x * 256)
                             (fromIntegral y * 256)
                             (fromIntegral z * 256)
+
+sourceCol :: Bool -- ^ is foreground?
+      -> Yi.Style.Color -> Cairo.Render ()
+sourceCol True  Default = Cairo.setSourceRGB 0 0 0
+sourceCol False Default = Cairo.setSourceRGB 1 1 1
+sourceCol _ (RGB r g b) = Cairo.setSourceRGB (fromIntegral r / 255)
+                                             (fromIntegral g / 255)
+                                             (fromIntegral b / 255)
 
 -- * GTK Event handlers
 
