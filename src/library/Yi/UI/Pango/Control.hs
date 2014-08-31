@@ -93,7 +93,9 @@ import Yi.String (showT)
 import System.FilePath
 import qualified Yi.UI.Common as Common
 import Graphics.Rendering.Pango.Cairo (showLayout)
-import qualified Graphics.Rendering.Cairo as Cairo (moveTo, lineTo, rectangle, setSourceRGB, Render)
+import qualified Graphics.Rendering.Cairo as Cairo
+       (setLineWidth, stroke, moveTo, lineTo, rectangle, setSourceRGB,
+        Render)
 
 data Control = Control
     { controlYi :: Yi
@@ -627,11 +629,13 @@ newView buffer font = do
 
         -- gcSetValues gc (newGCValues { Gtk.foreground = mkCol True $ Yi.Style.foreground $ baseAttributes $ configStyle $ configUI config })
         sourceCol True $ Yi.Style.foreground $ baseAttributes $ configStyle $ configUI config
+        Cairo.setLineWidth 2
         if inserting
             then do
                 Cairo.moveTo curx cury
                 Cairo.lineTo (curx + curw) (cury + curh)
             else do Cairo.rectangle chx chy (if chw > 0 then chw else 8) chh
+        Cairo.stroke
 
         return ()
 

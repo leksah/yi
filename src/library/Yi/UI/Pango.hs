@@ -68,7 +68,9 @@ import           Yi.Window
 
 import Graphics.Rendering.Cairo.Internal (Render(..))
 import Graphics.Rendering.Pango.Cairo (showLayout)
-import qualified Graphics.Rendering.Cairo as Cairo (moveTo, lineTo, rectangle, setSourceRGB, setLineWidth, Render)
+import qualified Graphics.Rendering.Cairo as Cairo
+       (stroke, moveTo, lineTo, rectangle, setSourceRGB, setLineWidth,
+        Render)
 import Control.Monad.Reader (ask, liftIO, runReaderT)
 
 -- We use IORefs in all of these datatypes for all fields which could
@@ -566,6 +568,7 @@ render ui w = do
         else do -- if we aren't inserting, we want a rectangle around the current character
           PangoRectangle (succ -> chx) chy chw chh <- liftIO $ layoutIndexToPos layout (rel cur)
           Cairo.rectangle chx chy (if chw > 0 then chw else 8) chh
+      Cairo.stroke
 
     return ()
 
