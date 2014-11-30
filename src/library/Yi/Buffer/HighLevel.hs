@@ -111,6 +111,10 @@ module Yi.Buffer.HighLevel
     , upScreensB
     , vimScrollB
     , vimScrollByB
+    , atSof
+    , readCharB
+    , nextPointB
+    , prevPointB
     ) where
 
 import           Control.Applicative
