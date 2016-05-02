@@ -27,25 +27,25 @@ module Yi.Keymap.Vim.Utils
   , addVimJumpHereE
   ) where
 
-import           Control.Applicative
-import           Control.Lens hiding (snoc)
-import           Control.Monad
-import           Data.Char (isSpace)
-import           Data.Foldable (asum)
-import           Data.List (group)
-import qualified Data.Text as T
-import           Safe (headDef)
-import           Yi.Buffer.Adjusted hiding (Insert)
+import           Control.Applicative      ((<$), (<$>))
+import           Control.Lens             ((.=), use)
+import           Control.Monad            (forM_, void, when)
+import           Data.Char                (isSpace)
+import           Data.Foldable            (asum)
+import           Data.List                (group)
+import qualified Data.Text                as T (unpack)
+import           Safe                     (headDef)
+import           Yi.Buffer.Adjusted       hiding (Insert)
 import           Yi.Editor
-import           Yi.Event
-import           Yi.Keymap
+import           Yi.Event                 (Event)
+import           Yi.Keymap                (YiM)
 import           Yi.Keymap.Vim.Common
-import           Yi.Keymap.Vim.EventUtils
-import           Yi.Keymap.Vim.Motion
-import           Yi.Keymap.Vim.StateUtils
-import           Yi.Monad
-import           Yi.Rope (YiString, last, countNewLines)
-import qualified Yi.Rope as R
+import           Yi.Keymap.Vim.EventUtils (eventToEventString, splitCountedCommand)
+import           Yi.Keymap.Vim.Motion     (Move (Move), stringToMove)
+import           Yi.Keymap.Vim.StateUtils (getMaybeCountE, modifyStateE, resetCountE)
+import           Yi.Monad                 (whenM)
+import           Yi.Rope                  (YiString, countNewLines, last)
+import qualified Yi.Rope                  as R (replicateChar, snoc)
 
 -- 'mkBindingE' and 'mkBindingY' are helper functions for bindings
 -- where VimState mutation is not dependent on action performed
@@ -125,7 +125,6 @@ mkMotionBinding token condition = VimBindingE f
 
     go :: String -> Move -> EditorM RepeatToken
     go evs (Move _style isJump move) = do
-        state <- getEditorDyn
         count <- getMaybeCountE
         prevPoint <- withCurrentBuffer $ do
             p <- pointB
@@ -135,14 +134,16 @@ mkMotionBinding token condition = VimBindingE f
         when isJump $ addVimJumpAtE prevPoint
         resetCountE
 
+        sticky <- withCurrentBuffer $ use stickyEolA
+
         -- moving with j/k after $ sticks cursor to the right edge
-        when (evs == "$") $ setStickyEolE True
-        when (evs `elem` group "jk" && vsStickyEol state) $
+        when (evs == "$") . withCurrentBuffer $ stickyEolA .= True
+        when (evs `elem` group "jk" && sticky) $
             withCurrentBuffer $ moveToEol >> moveXorSol 1
-        when (evs `notElem` group "jk$") $ setStickyEolE False
+        when (evs `notElem` group "jk$") . withCurrentBuffer $ stickyEolA .= False
 
         let m = head evs
-        when (m `elem` "fFtT") $ do
+        when (m `elem` ('f' : "FtT")) $ do
             let c = Prelude.last evs
                 (dir, style) =
                     case m of
@@ -169,21 +170,22 @@ indentBlockRegionB count reg = do
   indentSettings <- indentSettingsB
   (start, lengths) <- shapeOfBlockRegionB reg
   moveTo start
-  forM_ (zip [1..] lengths) $ \(i, _) ->
+  forM_ (zip [1..] lengths) $ \(i, _) -> do
       whenM (not <$> atEol) $ do
         let w = shiftWidth indentSettings
         if count > 0
         then insertN $ R.replicateChar (count * w) ' '
-        else do
-            let go 0 = return ()
-                go n = do
-                    c <- readB
-                    when (c == ' ') $
-                        deleteN 1 >> go (n - 1)
-            go (abs count * w)
-        moveTo start
-        void $ lineMoveRel i
+        else go (abs count * w)
+      moveTo start
+      void $ lineMoveRel i
   moveTo start
+  where
+      go 0 = return ()
+      go n = do
+          c <- readB
+          when (c == ' ') $
+              deleteN 1 >> go (n - 1)
+
 
 pasteInclusiveB :: YiString -> RegionStyle -> BufferM ()
 pasteInclusiveB rope style = do

@@ -1,14 +1,13 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE CPP                        #-}
+{-# LANGUAGE DeriveDataTypeable         #-}
+{-# LANGUAGE DeriveGeneric              #-}
+{-# LANGUAGE FlexibleContexts           #-}
+{-# LANGUAGE FlexibleInstances          #-}
+{-# LANGUAGE FunctionalDependencies     #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE LambdaCase                 #-}
+{-# LANGUAGE OverloadedStrings          #-}
+{-# LANGUAGE TemplateHaskell            #-}
 {-# OPTIONS_HADDOCK show-extensions #-}
 
 -- |
@@ -20,31 +19,32 @@
 
 module Yi.Snippets where
 
-import           Control.Applicative
-import           Control.Arrow
-import           Control.Lens hiding (Action)
-import           Control.Monad
-import           Control.Monad.RWS hiding (mapM, mapM_, sequence, get, put)
-import           Data.Binary
-import           Data.Char (isSpace)
-import           Data.Default
-#if __GLASGOW_HASKELL__ < 708
-import           Data.DeriveTH
-#else
 import           GHC.Generics (Generic)
-#endif
-import           Data.Foldable (find)
-import           Data.List hiding (find, elem, concat, concatMap)
-import           Data.Maybe (catMaybes)
-import qualified Data.Text as T
-import           Data.Typeable
+
+import           Control.Applicative (some)
+import           Control.Arrow       (second)
+import           Control.Lens        (use, (.=))
+import           Control.Monad.RWS   (MonadPlus (mplus), MonadReader (ask),
+                                      MonadState, MonadTrans (..),
+                                      MonadWriter (tell),
+                                      Monoid (mappend, mempty), RWST, evalRWST,
+                                      filterM, forM, forM_, liftM2, unless,
+                                      when, (<>))
+import           Data.Binary         (Binary)
+import           Data.Char           (isSpace)
+import           Data.Default        (Default, def)
+import           Data.Foldable       (find)
+import           Data.List           (foldl', groupBy, intersperse, nub, sort)
+import           Data.Maybe          (catMaybes)
+import qualified Data.Text           as T (Text)
+import           Data.Typeable       (Typeable)
 import           Yi.Buffer
-import           Yi.Editor
-import           Yi.Keymap
+import           Yi.Editor           (withCurrentBuffer)
+import           Yi.Keymap           (Action)
 import           Yi.Keymap.Keys
-import qualified Yi.Rope as R
-import           Yi.TextCompletion
-import           Yi.Types (YiVariable)
+import qualified Yi.Rope             as R
+import           Yi.TextCompletion   (resetComplete, wordCompleteString')
+import           Yi.Types            (YiVariable)
 
 type SnippetCmd = RWST (Int, Int) [MarkInfo] () BufferM
 
@@ -61,14 +61,9 @@ data MarkInfo = SimpleMarkInfo { userIndex :: !Int
               | DependentMarkInfo { userIndex :: !Int
                                   , startMark :: !Mark
                                   , endMark :: !Mark }
-  deriving (Eq, Show)
+  deriving (Eq, Show, Generic)
 
-#if __GLASGOW_HASKELL__ < 708
-$(derive makeBinary ''MarkInfo)
-#else
-deriving instance Generic MarkInfo
 instance Binary MarkInfo
-#endif
 
 newtype BufferMarks = BufferMarks { bufferMarks :: [MarkInfo] }
   deriving (Eq, Show, Monoid, Typeable, Binary)
@@ -203,7 +198,7 @@ updateUpdatedMarks upds = findEditedMarks upds >>=
                           mapM_ updateDependents
 
 findEditedMarks :: [Update] -> BufferM [MarkInfo]
-findEditedMarks upds = liftM (nub . concat) (mapM findEditedMarks' upds)
+findEditedMarks upds = fmap (nub . concat) (mapM findEditedMarks' upds)
   where
     findEditedMarks' :: Update -> BufferM [MarkInfo]
     findEditedMarks' upd = do
@@ -318,8 +313,8 @@ findOverlappingMarksWith :: (MarkInfo -> BufferM Region)
                          -> Bool -> Region -> MarkInfo -> BufferM [MarkInfo]
 findOverlappingMarksWith fMarkRegion flattenMarks border r m =
   let markFilter = filter (m /=) . flattenMarks . marks
-      regOverlap = liftM (regionsOverlap border r) . fMarkRegion
-  in liftM markFilter getBufferDyn >>= filterM regOverlap
+      regOverlap = fmap (regionsOverlap border r) . fMarkRegion
+  in fmap markFilter getBufferDyn >>= filterM regOverlap
 
 findOverlappingMarks :: ([[MarkInfo]] -> [MarkInfo]) -> Bool -> Region ->
                         MarkInfo -> BufferM [MarkInfo]

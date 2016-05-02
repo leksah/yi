@@ -1,9 +1,9 @@
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE CPP                #-}
 {-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE DeriveGeneric      #-}
+{-# LANGUAGE FlexibleContexts   #-}
+{-# LANGUAGE OverloadedStrings  #-}
+{-# LANGUAGE TemplateHaskell    #-}
 {-# OPTIONS_HADDOCK show-extensions #-}
 
 -- |
@@ -22,7 +22,6 @@ module Yi.Tag ( lookupTag
               , hintTags
               , completeTag
               , Tag(..)
-              , mkTag
               , unTag'
               , TagTable(..)
               , getTags
@@ -31,33 +30,29 @@ module Yi.Tag ( lookupTag
               , tagsFileList
               ) where
 
-import           Control.Applicative
-import           Control.Lens
-import           Data.Binary
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.UTF8 as BS8
-#if __GLASGOW_HASKELL__ < 708
-import           Data.DeriveTH
-#else
 import           GHC.Generics (Generic)
-#endif
-import           Data.Default
-import qualified Data.Foldable as F
-import           Data.List (isPrefixOf)
-import           Data.Map (Map, fromListWith, lookup, keys)
-import           Data.Maybe (mapMaybe)
-import qualified Data.Text as T
-import qualified Data.Text.Encoding as E
-import qualified Data.Trie as Trie
-import           Data.Typeable
-import           System.FilePath (takeFileName, takeDirectory, (</>))
-import           System.FriendlyPath
-import           Yi.Editor
+
+import           Control.Applicative    ((<$>))
+import           Control.Lens           (makeLenses)
+import           Data.Binary            (Binary, get, put)
+import qualified Data.ByteString        as BS (readFile)
+import           Data.Default           (Default, def)
+import qualified Data.Foldable          as F (concat)
+import           Data.Map               (Map, fromListWith, keys, lookup)
+import           Data.Maybe             (mapMaybe)
+import qualified Data.Text              as T (Text, append, isPrefixOf, lines, pack, unpack, words)
+import qualified Data.Text.Encoding     as E (decodeUtf8, encodeUtf8)
+import qualified Data.Text.Read         as R (decimal)
+import qualified Data.Trie              as Trie (Trie, certainSuffix, fromList, possibleSuffixes)
+import           Data.Typeable          (Typeable)
+import           System.FilePath        (takeDirectory, takeFileName, (</>))
+import           System.FriendlyPath    (expandTilda)
 import           Yi.Config.Simple.Types (Field, customVariable)
-import           Yi.Types (YiVariable, YiConfigVariable)
+import           Yi.Editor              (EditorM, getEditorDyn, putEditorDyn)
+import           Yi.Types               (YiConfigVariable, YiVariable)
 
 newtype TagsFileList  = TagsFileList { _unTagsFileList :: [FilePath] }
-    deriving Typeable
+    deriving (Typeable, Generic)
 
 instance Default TagsFileList where
     def = TagsFileList ["tags"]
@@ -69,7 +64,7 @@ makeLenses ''TagsFileList
 tagsFileList :: Field [FilePath]
 tagsFileList = customVariable . unTagsFileList
 
-newtype Tags  = Tags (Maybe TagTable) deriving Typeable
+newtype Tags = Tags (Maybe TagTable) deriving (Typeable, Generic)
 
 instance Default Tags where
     def = Tags Nothing
@@ -78,28 +73,25 @@ instance YiVariable Tags
 
 newtype Tag = Tag { _unTag :: T.Text } deriving (Show, Eq, Ord)
 
--- | Helper
-mkTag :: String -> Tag
-mkTag = Tag . T.pack
-
-unTag' :: Tag -> String
-unTag' = T.unpack . _unTag
+unTag' :: Tag -> T.Text
+unTag' =  _unTag
 
 instance Binary Tag where
   put (Tag t) = put (E.encodeUtf8 t)
   get = Tag . E.decodeUtf8 <$> get
 
-data TagTable = TagTable { tagFileName :: FilePath
-                           -- ^ local name of the tag file
-                           -- TODO: reload if this file is changed
-                           , tagBaseDir :: FilePath
-                           -- ^ path to the tag file directory
-                           -- tags are relative to this path
-                           , tagFileMap :: Map Tag [(FilePath, Int)]
-                           -- ^ map from tags to files
-                           , tagTrie :: Trie.Trie
-                           -- ^ trie to speed up tag hinting
-                         } deriving Typeable
+data TagTable = TagTable
+    { tagFileName :: FilePath
+    -- ^ local name of the tag file
+    -- TODO: reload if this file is changed
+    , tagBaseDir :: FilePath
+    -- ^ path to the tag file directory
+    -- tags are relative to this path
+    , tagFileMap :: Map Tag [(FilePath, Int)]
+    -- ^ map from tags to files
+    , tagTrie :: Trie.Trie
+    -- ^ trie to speed up tag hinting
+    } deriving (Typeable, Generic)
 
 -- | Find the location of a tag using the tag table.
 -- Returns a full path and line number
@@ -110,20 +102,21 @@ lookupTag tag tagTable = do
 
 -- | Super simple parsing CTag format 1 parsing algorithm
 -- TODO: support search patterns in addition to lineno
-readCTags :: String -> Map Tag [(FilePath, Int)]
+readCTags :: T.Text -> Map Tag [(FilePath, Int)]
 readCTags =
-    fromListWith (++) . mapMaybe (parseTagLine . words) . lines
+    fromListWith (++) . mapMaybe (parseTagLine . T.words) . T.lines
     where parseTagLine (tag:tagfile:lineno:_) =
               -- remove ctag control lines
-              if "!_TAG_" `isPrefixOf` tag then Nothing
-              else Just (mkTag tag, [(tagfile, fst . head . reads $ lineno)])
+              if "!_TAG_" `T.isPrefixOf` tag then Nothing
+              else Just (Tag tag, [(T.unpack tagfile, getLineNumber lineno)])
+              where getLineNumber = (\(Right x) -> x) . fmap fst . R.decimal
           parseTagLine _ = Nothing
 
 -- | Read in a tag file from the system
 importTagTable :: FilePath -> IO TagTable
 importTagTable filename = do
   friendlyName <-  expandTilda filename
-  tagStr <- fmap BS8.toString $ BS.readFile friendlyName
+  tagStr <- E.decodeUtf8 <$> BS.readFile friendlyName
   let cts = readCTags tagStr
   return TagTable { tagFileName = takeFileName filename
                   , tagBaseDir  = takeDirectory filename
@@ -162,15 +155,6 @@ getTags = do
   Tags t <- getEditorDyn
   return t
 
-#if __GLASGOW_HASKELL__ < 708
-$(derive makeBinary ''Tags)
-$(derive makeBinary ''TagTable)
-$(derive makeBinary ''TagsFileList)
-#else
-deriving instance Generic Tags
-deriving instance Generic TagTable
-deriving instance Generic TagsFileList
 instance Binary Tags
 instance Binary TagTable
 instance Binary TagsFileList
-#endif

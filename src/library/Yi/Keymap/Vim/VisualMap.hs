@@ -12,26 +12,26 @@
 
 module Yi.Keymap.Vim.VisualMap ( defVisualMap ) where
 
-import           Control.Applicative
-import           Control.Lens hiding ((-~), op)
-import           Control.Monad
-import           Data.Char (ord)
-import           Data.List (group)
-import           Data.Maybe (fromJust)
-import qualified Data.Text as T
-import           Yi.Buffer.Adjusted hiding (Insert)
+import           Control.Applicative        ((<$), (<$>))
+import           Control.Lens               ((.=))
+import           Control.Monad              (forM_, void)
+import           Data.Char                  (ord)
+import           Data.List                  (group)
+import           Data.Maybe                 (fromJust)
+import qualified Data.Text                  as T (unpack)
+import           Yi.Buffer.Adjusted         hiding (Insert)
 import           Yi.Editor
 import           Yi.Keymap.Vim.Common
-import           Yi.Keymap.Vim.Operator
+import           Yi.Keymap.Vim.Operator     (VimOperator (..), opDelete, stringToOperator)
 import           Yi.Keymap.Vim.StateUtils
-import           Yi.Keymap.Vim.StyledRegion
-import           Yi.Keymap.Vim.Tag
-import           Yi.Keymap.Vim.Utils
-import           Yi.MiniBuffer
-import           Yi.Monad
-import qualified Yi.Rope as R
-import           Yi.Tag
-import           Yi.Utils
+import           Yi.Keymap.Vim.StyledRegion (StyledRegion (StyledRegion), transformCharactersInRegionB)
+import           Yi.Keymap.Vim.Tag          (gotoTag)
+import           Yi.Keymap.Vim.Utils        (matchFromBool, mkChooseRegisterBinding, mkMotionBinding)
+import           Yi.MiniBuffer              (spawnMinibufferE)
+import           Yi.Monad                   (whenM)
+import qualified Yi.Rope                    as R (toText)
+import           Yi.Tag                     (Tag (Tag))
+import           Yi.Utils                   (SemiNum ((-~)))
 
 defVisualMap :: [VimOperator] -> [VimBinding]
 defVisualMap operators =
@@ -80,7 +80,7 @@ zeroBinding = VimBindingE f
                   Nothing -> do
                       withCurrentBuffer moveToSol
                       resetCountE
-                      setStickyEolE False
+                      withCurrentBuffer $ stickyEolA .= False
                       return Continue
           f _ _ = NoMatch
 
@@ -142,6 +142,9 @@ operatorBindings :: [VimOperator] -> [VimBinding]
 operatorBindings operators = fmap mkOperatorBinding $ operators ++ visualOperators
     where visualOperators = fmap synonymOp
                                   [ ("x", "d")
+                                  , ("s", "c")
+                                  , ("S", "c")
+                                  , ("C", "c")
                                   , ("~", "g~")
                                   , ("Y", "y")
                                   , ("u", "gu")
@@ -218,7 +221,7 @@ replaceBinding = VimBindingE (f . T.unpack . _unEv)
 
 switchEdgeBinding :: VimBinding
 switchEdgeBinding = VimBindingE (f . T.unpack . _unEv)
-    where f [c] (VimState { vsMode = (Visual _) }) | c `elem` "oO"
+    where f [c] (VimState { vsMode = (Visual _) }) | c `elem` ['o', 'O']
               = WholeMatch $ do
                   (Visual style) <- vsMode <$> getEditorDyn
                   withCurrentBuffer $ do
@@ -242,7 +245,8 @@ insertBinding = VimBindingE (f . T.unpack . _unEv)
                       "I" -> leftEdgesOfRegionB style region
                       "A" -> rightEdgesOfRegionB style region
                       _ -> error "Just silencing ghc's false positive warning."
-                  withCurrentBuffer $ moveTo $ head cursors
+                  case cursors of
+                      (mainCursor : _) -> withCurrentBuffer (moveTo mainCursor)
                   modifyStateE $ \s -> s { vsSecondaryCursors = drop 1 cursors }
                   switchModeE $ Insert (head evs)
                   return Continue

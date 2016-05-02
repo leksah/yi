@@ -1,10 +1,10 @@
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE CPP                #-}
 {-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE DeriveGeneric      #-}
+{-# LANGUAGE FlexibleContexts   #-}
+{-# LANGUAGE LambdaCase         #-}
+{-# LANGUAGE OverloadedStrings  #-}
+{-# LANGUAGE TemplateHaskell    #-}
 {-# OPTIONS_HADDOCK show-extensions #-}
 
 -- |
@@ -22,50 +22,42 @@ module Yi.Keymap.Vim.Tag
     , unpopTag
     ) where
 
-import           Control.Applicative
-import           Control.Lens (view)
-import           Control.Monad
-import           Data.Binary
-import           Data.Default
-#if __GLASGOW_HASKELL__ < 708
-import           Data.DeriveTH
-#else
 import           GHC.Generics (Generic)
-#endif
-import           Data.Maybe
-import           Data.Monoid
-import qualified Data.Text as T
-import           Data.Typeable
-import           System.Directory (doesFileExist)
-import           System.FilePath
-import           System.FriendlyPath
+
+import           Control.Applicative ((<$>))
+import           Control.Lens        (view)
+import           Control.Monad       (foldM, void)
+import           Data.Binary         (Binary (..))
+import           Data.Default        (Default (..))
+import           Data.Maybe          (maybeToList)
+import           Data.Monoid         ((<>))
+import qualified Data.Text           as T (Text)
+import           Data.Typeable       (Typeable)
+import           System.Directory    (doesFileExist)
+import           System.FilePath     (takeDirectory, (</>))
+import           System.FriendlyPath (userToCanonPath)
 import           Yi.Buffer
-import           Yi.Core (errorEditor)
-import           Yi.Types (YiVariable)
+import           Yi.Core             (errorEditor)
 import           Yi.Editor
-import           Yi.File
-import           Yi.Keymap
+import           Yi.File             (openingNewFile)
+import           Yi.Keymap           (YiM)
 import           Yi.Tag
-import           Yi.Utils
+import           Yi.Types            (YiVariable)
+import           Yi.Utils            (io)
 
 -- | List of tags and the file/line/char that they originate from.
 -- (the location that :tag or Ctrl-[ was called from).
-data VimTagStack = VimTagStack {
-        tagStackList :: [(Tag, Int, FilePath, Int, Int)]
-      , tagStackIndex :: Int }
-    deriving Typeable
+data VimTagStack = VimTagStack
+    { tagStackList :: [(Tag, Int, FilePath, Int, Int)]
+    , tagStackIndex :: Int
+    } deriving (Typeable, Generic)
 
 instance Default VimTagStack where
     def = VimTagStack [] 0
 
 instance YiVariable VimTagStack
 
-#if __GLASGOW_HASKELL__ < 708
-$(derive makeBinary ''VimTagStack)
-#else
-deriving instance Generic VimTagStack
 instance Binary VimTagStack
-#endif
 
 -- | Returns tag, tag index, filepath, line number, char number
 getTagList :: EditorM [(Tag, Int, FilePath, Int, Int)]

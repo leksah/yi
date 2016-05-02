@@ -1,7 +1,7 @@
 {-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE LambdaCase         #-}
+{-# LANGUAGE OverloadedStrings  #-}
+{-# LANGUAGE TemplateHaskell    #-}
 {-# OPTIONS_HADDOCK show-extensions #-}
 
 -- |
@@ -18,12 +18,12 @@ module Yi.File (
   openNewFile,
 
   viWrite, viWriteTo, viSafeWriteTo,
-  fwriteE,        -- :: YiM ()
-  fwriteBufferE,  -- :: BufferM ()
-  fwriteAllE,     -- :: YiM ()
-  fwriteToE,      -- :: String -> YiM ()
-  backupE,        -- :: FilePath -> YiM ()
-  revertE,        -- :: YiM ()
+  fwriteE,
+  fwriteBufferE,
+  fwriteAllY,
+  fwriteToE,
+  backupE,
+  revertE,
 
   -- * Helper functions
   setFileName,
@@ -33,28 +33,28 @@ module Yi.File (
   preSaveHooks
  ) where
 
-import           Control.Applicative
-import           Control.Lens hiding (act, Action)
-import           Control.Monad (when, void)
-import           Control.Monad.Base
-import           Data.Default
-import           Data.Monoid
-import qualified Data.Text as T
-import           Data.Typeable
-import           Data.Time
-import           System.Directory
-import           System.FriendlyPath
+import           Control.Applicative    ((<$>))
+import           Control.Lens           (assign, makeLenses, use, view, (^.))
+import           Control.Monad          (filterM, void, when)
+import           Control.Monad.Base     (liftBase)
+import           Data.Default           (Default, def)
+import           Data.Monoid            ((<>))
+import qualified Data.Text              as T (Text, append, cons, pack, unpack)
+import           Data.Time              (getCurrentTime)
+import           Data.Typeable          (Typeable)
+import           System.Directory       (doesDirectoryExist, doesFileExist)
+import           System.FriendlyPath    (userToCanonPath)
 import           Yi.Buffer
-import           Yi.Config.Simple.Types (customVariable, Field)
-import           Yi.Core
-import           Yi.Dired
+import           Yi.Config.Simple.Types (Field, customVariable)
+import           Yi.Core                (errorEditor, runAction)
+import           Yi.Dired               (editFile)
 import           Yi.Editor
-import           Yi.Keymap
-import           Yi.Monad
-import qualified Yi.Rope as R
-import           Yi.String
+import           Yi.Keymap              ()
+import           Yi.Monad               (gets)
+import qualified Yi.Rope                as R (readFile, writeFile, writeFileUsingText)
+import           Yi.String              (showT)
 import           Yi.Types
-import           Yi.Utils
+import           Yi.Utils               (io)
 
 newtype PreSaveHooks = PreSaveHooks { _unPreSaveHooks :: [Action] }
     deriving Typeable
@@ -104,7 +104,7 @@ revertE =
 viWrite :: YiM ()
 viWrite =
   withCurrentBuffer (gets file) >>= \case
-    Nothing -> errorEditor "no file name associate with buffer"
+    Nothing -> errorEditor "no file name associated with buffer"
     Just f  -> do
       bufInfo <- withCurrentBuffer bufInfoB
       let s   = bufInfoFileName bufInfo
@@ -169,11 +169,10 @@ fwriteToE f = do
   fwriteBufferE b
 
 -- | Write all open buffers
-fwriteAllE :: YiM Bool
-fwriteAllE =
-  do allBuffs <- gets bufferSet
-     let modifiedBuffers = filter (not . isUnchangedBuffer) allBuffs
-     and <$> mapM fwriteBufferE (fmap bkey modifiedBuffers)
+fwriteAllY :: YiM Bool
+fwriteAllY = do
+    modifiedBuffers <- filterM deservesSave =<< gets bufferSet
+    and <$> mapM fwriteBufferE (fmap bkey modifiedBuffers)
 
 -- | Make a backup copy of file
 backupE :: FilePath -> YiM ()

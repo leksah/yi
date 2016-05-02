@@ -60,7 +60,9 @@ module Yi.Config.Simple (
   modifyModeByName,
   -- * Evaluation of commands
   evaluator,
+#ifdef HINT
   ghciEvaluator,
+#endif
   publishedActionsEvaluator,
   publishAction,
   publishedActions,
@@ -119,7 +121,7 @@ module Yi.Config.Simple (
  ) where
 
 import           Control.Applicative
-import           Control.Lens hiding (Action)
+import           Control.Lens (Lens', (.=), (%=), (%~), use, lens)
 import           Control.Monad.State hiding (modify, get)
 import           Data.Maybe(mapMaybe)
 import qualified Data.Text as T

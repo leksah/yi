@@ -1,9 +1,12 @@
-{-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE CPP                        #-}
+{-# LANGUAGE DeriveDataTypeable         #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE LambdaCase                 #-}
+{-# LANGUAGE OverloadedStrings          #-}
+{-# LANGUAGE TemplateHaskell            #-}
+#ifdef HINT
 {-# LANGUAGE FlexibleContexts #-}
+#endif
 {-# OPTIONS_HADDOCK show-extensions #-}
 
 -- |
@@ -24,7 +27,9 @@ module Yi.Eval (
         Evaluator(..),
         evaluator,
         -- ** Standard evaluators
+#ifdef HINT
         ghciEvaluator,
+#endif
         publishedActionsEvaluator,
         publishedActions,
         publishAction,
@@ -34,40 +39,85 @@ module Yi.Eval (
         consoleKeymap
 ) where
 
-import           Control.Applicative ((<$>), (<*>))
-import           Control.Concurrent
-import           Control.Monad.Catch (try)
-import           Control.Lens hiding (Action)
-import           Control.Monad hiding (mapM_)
-import           Control.Monad.Base
-import           Control.Monad.Trans (lift)
-import           Data.Array
-import           Data.Binary
-import           Data.Default
-import           Data.Foldable (mapM_)
+import Prelude hiding (mapM_)
+
+import Control.Applicative ( (<$>), (<*>) )
+import Control.Lens ( (^.), (<&>), (.=), (%=) )
+import Control.Monad (when)
+import Data.Array ( elems )
+import Data.Binary ( Binary )
+import Data.Default ( Default, def )
+import Data.Foldable ( mapM_ )
 import qualified Data.HashMap.Strict as M
-import           Data.List
-import           Data.Monoid
-import           Data.Typeable
+    ( HashMap, insert, lookup, empty, keys )
+import Data.Monoid ( mempty, Monoid, (<>) )
+import Data.Typeable ( Typeable )
+#ifdef HINT
+import Control.Concurrent
+    ( takeMVar, putMVar, newEmptyMVar, MVar, forkIO )
+import Control.Monad
+    ( Monad((>>), (>>=), return), void, forever )
+import Control.Monad.Base ( MonadBase )
+import Control.Monad.Catch ( try )
+import Control.Monad.Trans ( lift )
+import Data.Binary ( get, put )
+import Data.List ( sort )
 import qualified Language.Haskell.Interpreter as LHI
-import           Prelude hiding (error, mapM_)
-import           System.Directory (doesFileExist)
-import           Text.Read (readMaybe)
-import           Yi.Boot.Internal (reload)
-import           Yi.Buffer
-import           Yi.Config.Simple.Types
-import           Yi.Core (errorEditor, runAction)
-import           Yi.Types (YiVariable,YiConfigVariable)
-import           Yi.Editor
-import           Yi.File
-import           Yi.Hooks
-import           Yi.Keymap
-import           Yi.Keymap.Keys
-import qualified Yi.Paths (getEvaluatorContextFilename)
-import           Yi.Regex
+    ( typeOf,
+      setImportsQ,
+      searchPath,
+      set,
+      runInterpreter,
+      ModuleElem(Data, Class, Fun),
+      getModuleExports,
+      as,
+      loadModules,
+      languageExtensions,
+      OptionVal((:=)),
+      InterpreterError,
+      Extension(OverloadedStrings),
+      setTopLevelModules,
+      interpret )
+import System.Directory ( doesFileExist )
+import Yi.Boot.Internal ( reload )
+import Yi.Core ( errorEditor )
+import Yi.Editor
+    ( getEditorDyn,
+      putEditorDyn,
+      MonadEditor)
+import qualified Yi.Paths ( getEvaluatorContextFilename )
+import Yi.String ( showT )
+import Yi.Utils ( io )
+#endif
+import Text.Read ( readMaybe )
+import Yi.Buffer
+    ( gotoLn,
+      moveXorEol,
+      BufferM,
+      readLnB,
+      pointB,
+      botB,
+      insertN,
+      getBookmarkB,
+      markPointA )
+import Yi.Config.Simple.Types ( customVariable, Field, ConfigM )
+import Yi.Core ( runAction )
+import Yi.Types ( YiVariable, YiConfigVariable )
+import Yi.Editor
+    ( printMsg,
+      askCfg,
+      withCurrentBuffer,
+      withCurrentBuffer )
+import Yi.File ( openingNewFile )
+import Yi.Hooks ( runHook )
+import Yi.Keymap
+    ( YiM, Action, YiAction, makeAction, Keymap, write )
+import Yi.Keymap.Keys ( event, Event(..), Key(KEnter) )
+import Yi.Regex ( Regex, makeRegex, matchOnceText )
 import qualified Yi.Rope as R
-import           Yi.String
-import           Yi.Utils
+    ( toString, YiString, splitAt, length )
+import Yi.Utils ( makeLensesWithSuffix )
+
 
 -- TODO: should we be sticking Text here?
 
@@ -112,9 +162,6 @@ data Evaluator = Evaluator
 evaluator :: Field Evaluator
 evaluator = customVariable
 
-instance Default Evaluator where def = ghciEvaluator
-instance YiConfigVariable Evaluator
-
 -- * Evaluator based on GHCi
 -- | Cached variable for getAllNamesInScopeImpl
 newtype NamesCache = NamesCache [String] deriving (Typeable, Binary)
@@ -130,6 +177,7 @@ instance Default HelpCache where
     def = HelpCache M.empty
 instance YiVariable HelpCache
 
+#ifdef HINT
 type HintRequest = (String, MVar (Either LHI.InterpreterError Action))
 newtype HintThreadVar = HintThreadVar (Maybe (MVar HintRequest))
   deriving (Typeable, Default)
@@ -157,11 +205,7 @@ hintEvaluatorThread request contextFile = do
   void $ LHI.runInterpreter $ do
     LHI.set [LHI.searchPath LHI.:= []]
 
-    -- We no longer have Yi.Prelude, perhaps we should remove
-    -- NoImplicitPrelude?
-    LHI.set [LHI.languageExtensions LHI.:= [ LHI.OverloadedStrings
-                                           , LHI.NoImplicitPrelude
-                                           ]]
+    LHI.set [LHI.languageExtensions LHI.:= [ LHI.OverloadedStrings ]]
     when haveUserContext $ do
       LHI.loadModules [contextFile]
       LHI.setTopLevelModules ["Env"]
@@ -244,6 +288,8 @@ ghciEvaluator = Evaluator { execEditorActionImpl = execAction
                          return newDescription
                        Just description -> return description
       return $ name ++ " :: " ++ description
+
+#endif
 
 -- * 'PublishedActions' evaluator
 
@@ -345,3 +391,12 @@ consoleKeymap = do
         bm <- getBookmarkB "errorInsert"
         markPointA bm .= pt
       execEditorAction . R.toString $ takeCommand x
+
+instance Default Evaluator where
+#ifdef HINT
+    def = ghciEvaluator
+#else
+    def = publishedActionsEvaluator
+#endif
+
+instance YiConfigVariable Evaluator

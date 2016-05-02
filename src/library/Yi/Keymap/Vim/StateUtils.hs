@@ -27,27 +27,26 @@ module Yi.Keymap.Vim.StateUtils
     , setRegisterE
     , getRegisterE
     , normalizeCountE
-    , setStickyEolE
     , maybeMult
     , updateModeIndicatorE
     , saveInsertEventStringE
     , resetActiveRegisterE
     ) where
 
-import           Control.Applicative
-import           Control.Monad
-import qualified Data.HashMap.Strict as HM
-import           Data.Maybe (fromMaybe)
-import           Data.Monoid
-import qualified Data.Text as T
-import           Yi.Buffer.Normal
-import           Yi.Editor
-import           Yi.Event
+import           Control.Applicative      ((<$>))
+import           Control.Monad            (when)
+import qualified Data.HashMap.Strict      as HM (insert, lookup)
+import           Data.Maybe               (fromMaybe, isJust)
+import           Data.Monoid              (Monoid (mempty), (<>))
+import qualified Data.Text                as T (null)
+import           Yi.Buffer.Normal         (RegionStyle (Block, LineWise))
+import           Yi.Editor                (EditorM, getEditorDyn, putEditorDyn, setStatus)
+import           Yi.Event                 (Event)
 import           Yi.Keymap.Vim.Common
 import           Yi.Keymap.Vim.EventUtils
-import           Yi.Rope (YiString)
-import           Yi.String (showT)
-import           Yi.Style (defaultStyle)
+import           Yi.Rope                  (YiString)
+import           Yi.String                (showT)
+import           Yi.Style                 (defaultStyle)
 
 switchMode :: VimMode -> VimState -> VimState
 switchMode mode state = state { vsMode = mode }
@@ -141,15 +140,16 @@ maybeMult Nothing  Nothing = Nothing
 maybeMult a        Nothing = a
 maybeMult Nothing  b       = b
 
-setStickyEolE :: Bool -> EditorM ()
-setStickyEolE b = modifyStateE $ \s -> s { vsStickyEol = b }
-
-updateModeIndicatorE :: VimMode -> EditorM ()
-updateModeIndicatorE prevMode = do
+updateModeIndicatorE :: VimState -> EditorM ()
+updateModeIndicatorE prevState = do
   currentState <- getEditorDyn
-  let mode = vsMode currentState
+  let mode     = vsMode currentState
+      prevMode = vsMode prevState
       paste = vsPaste currentState
-  when (mode /= prevMode) $ do
+      isRecording   = isJust . vsCurrentMacroRecording $ currentState
+      prevRecording = isJust . vsCurrentMacroRecording $ prevState
+
+  when (mode /= prevMode || isRecording /= prevRecording) $ do
       let modeName = case mode of
             Insert _ -> "INSERT" <> if paste then " (paste) " else ""
             InsertNormal -> "(insert)"
@@ -159,9 +159,14 @@ updateModeIndicatorE prevMode = do
             Visual LineWise -> "VISUAL LINE"
             Visual _ -> "VISUAL"
             _ -> ""
-          decoratedModeName = if T.null modeName
+
+          decoratedModeName' = if T.null modeName
                               then mempty
                               else "-- " <> modeName <> " --"
+          decoratedModeName = if isRecording
+                              then decoratedModeName' <> "recording"
+                              else decoratedModeName'
+
       setStatus ([decoratedModeName], defaultStyle)
 
 saveInsertEventStringE :: EventString -> EditorM ()

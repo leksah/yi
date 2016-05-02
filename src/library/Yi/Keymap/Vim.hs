@@ -22,39 +22,39 @@ module Yi.Keymap.Vim
     , relayoutFromTo
     ) where
 
-import Control.Applicative
-import Data.Char (toUpper)
-import Data.List (find)
-import Data.Monoid
-import Data.Prototype
-import Yi.Buffer.Adjusted hiding (Insert)
+import Control.Applicative                    ((<$>))
+import Data.Char                              (toUpper)
+import Data.List                              (find)
+import Data.Monoid                            (Monoid (mempty), (<>))
+import Data.Prototype                         (Proto (Proto), extractValue)
+import Yi.Buffer.Adjusted                     (commitUpdateTransactionB, startUpdateTransactionB)
 import Yi.Editor
-import Yi.Event
-import Yi.Keymap
-import Yi.Keymap.Keys (anyEvent)
+import Yi.Event                               (Event (..), Key (KASCII), Modifier (MCtrl, MMeta))
+import Yi.Keymap                              (Keymap, KeymapM, KeymapSet, YiM, modelessKeymapSet, write)
+import Yi.Keymap.Keys                         (anyEvent)
 import Yi.Keymap.Vim.Common
-import Yi.Keymap.Vim.Digraph
-import Yi.Keymap.Vim.EventUtils
-import Yi.Keymap.Vim.Ex
-import Yi.Keymap.Vim.ExMap
-import Yi.Keymap.Vim.InsertMap
-import Yi.Keymap.Vim.NormalMap
-import Yi.Keymap.Vim.NormalOperatorPendingMap
-import Yi.Keymap.Vim.Operator
-import Yi.Keymap.Vim.ReplaceMap
-import Yi.Keymap.Vim.ReplaceSingleCharMap
-import Yi.Keymap.Vim.SearchMotionMap
+import Yi.Keymap.Vim.Digraph                  (defDigraphs)
+import Yi.Keymap.Vim.EventUtils               (eventToEventString, parseEvents)
+import Yi.Keymap.Vim.Ex                       (ExCommand, defExCommandParsers)
+import Yi.Keymap.Vim.ExMap                    (defExMap)
+import Yi.Keymap.Vim.InsertMap                (defInsertMap)
+import Yi.Keymap.Vim.NormalMap                (defNormalMap)
+import Yi.Keymap.Vim.NormalOperatorPendingMap (defNormalOperatorPendingMap)
+import Yi.Keymap.Vim.Operator                 (VimOperator (..), defOperators)
+import Yi.Keymap.Vim.ReplaceMap               (defReplaceMap)
+import Yi.Keymap.Vim.ReplaceSingleCharMap     (defReplaceSingleMap)
+import Yi.Keymap.Vim.SearchMotionMap          (defSearchMotionMap)
 import Yi.Keymap.Vim.StateUtils
-import Yi.Keymap.Vim.Utils
-import Yi.Keymap.Vim.VisualMap
+import Yi.Keymap.Vim.Utils                    (selectBinding, selectPureBinding)
+import Yi.Keymap.Vim.VisualMap                (defVisualMap)
 
 data VimConfig = VimConfig {
-    vimKeymap :: Keymap
-  , vimBindings :: [VimBinding]
-  , vimOperators :: [VimOperator]
+    vimKeymap           :: Keymap
+  , vimBindings         :: [VimBinding]
+  , vimOperators        :: [VimOperator]
   , vimExCommandParsers :: [EventString -> Maybe ExCommand]
-  , vimDigraphs :: [(String, Char)]
-  , vimRelayout :: Char -> Char
+  , vimDigraphs         :: [(String, Char)]
+  , vimRelayout         :: Char -> Char
   }
 
 mkKeymapSet :: Proto VimConfig -> KeymapSet
@@ -92,9 +92,6 @@ defVimKeymap config = do
 -- which contains '.', which needs to eval things
 -- So as a workaround '.' just saves a string that needs eval in VimState
 -- and the actual evaluation happens in impureHandleEvent
---
--- TODO: pass through untouched 'EventString' to 'parseEvents' instead
--- of converting to 'String'.
 pureEval :: VimConfig -> EventString -> EditorM ()
 pureEval config = sequence_ . map (pureHandleEvent config) . parseEvents
 
@@ -155,7 +152,7 @@ genericHandleEvent getBindings pick config unconvertedEvent needsToConvertEvents
             _ -> return ()
 
         performEvalIfNecessary config
-        updateModeIndicatorE prevMode
+        updateModeIndicatorE currentState
 
 performEvalIfNecessary :: VimConfig -> EditorM ()
 performEvalIfNecessary config = do

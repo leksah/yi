@@ -1,10 +1,9 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE CPP                        #-}
+{-# LANGUAGE DeriveDataTypeable         #-}
+{-# LANGUAGE DeriveGeneric              #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE OverloadedStrings          #-}
+{-# LANGUAGE TemplateHaskell            #-}
 {-# OPTIONS_HADDOCK show-extensions #-}
 
 -- |
@@ -18,26 +17,23 @@
 
 module Yi.Mode.GHCi where
 
-import           Control.Lens
-import           Data.Binary
-import           Data.Default
-#if __GLASGOW_HASKELL__ < 708
-import           Data.DeriveTH
-#else
 import           GHC.Generics (Generic)
-#endif
-import           Data.Text ()
-import qualified Data.Text as T
-import           Data.Typeable
+
+import           Control.Lens         (makeLenses, (%~), (&), (.~))
+import           Data.Binary          (Binary (..))
+import           Data.Default         (Default (..))
+import           Data.Text            ()
+import qualified Data.Text            as T (findIndex)
+import           Data.Typeable        (Typeable)
 import           Yi.Buffer
-import           Yi.Types (YiVariable)
-import           Yi.Keymap
-import           Yi.Keymap.Keys
-import           Yi.Lexer.Alex (Tok)
-import           Yi.Lexer.Compilation (Token())
-import qualified Yi.Mode.Interactive as I
-import qualified Yi.Rope as R
+import           Yi.Keymap            (YiM, topKeymapA)
+import           Yi.Keymap.Keys       (Key (KHome), important, spec, (?>>!))
+import           Yi.Lexer.Alex        (Tok)
+import           Yi.Lexer.Compilation (Token ())
+import qualified Yi.Mode.Interactive  as I (mode, spawnProcessMode)
+import qualified Yi.Rope              as R (toText)
 import           Yi.Syntax.OnlineTree (Tree)
+import           Yi.Types             (YiVariable)
 
 -- | The process name to use to spawn GHCi.
 data GhciProcessName = GhciProcessName
@@ -45,7 +41,7 @@ data GhciProcessName = GhciProcessName
     -- ^ Command to run when spawning GHCi.
   , _ghciProcessArgs :: [String]
     -- ^ Args to pass to the process.
-  } deriving (Typeable, Show)
+  } deriving (Typeable, Show, Generic)
 
 -- | The process name defaults to @ghci@.
 instance Default GhciProcessName where
@@ -53,12 +49,7 @@ instance Default GhciProcessName where
                         , _ghciProcessArgs = []
                         }
 
-#if __GLASGOW_HASKELL__ < 708
-$(derive makeBinary ''GhciProcessName)
-#else
-deriving instance Generic GhciProcessName
 instance Binary GhciProcessName
-#endif
 
 makeLenses ''GhciProcessName
 

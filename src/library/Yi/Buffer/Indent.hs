@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS_HADDOCK show-extensions #-}
 
@@ -24,24 +25,26 @@ module Yi.Buffer.Indent
     , indentOfCurrentPosB
     , indentSettingsB
     , indentToB
+    , modifyIndentB
     , newlineAndIndentB
     , shiftIndentOfRegionB
     , tabB
     ) where
 
-import           Control.Applicative
-import           Control.Monad (when)
-import           Data.Char
-import           Data.List (sort, nub)
-import           Data.Monoid
-import           Yi.Buffer.Basic
-import           Yi.Buffer.HighLevel
+import           Control.Applicative ((<$>))
+import           Control.Monad       ()
+import           Data.Char           (isSpace)
+import           Data.List           (nub, sort)
+import           Data.Monoid         ((<>))
+import           Yi.Buffer.Basic     (Direction (..))
+import           Yi.Buffer.HighLevel (firstNonSpaceB, getNextLineB, getNextNonBlankLineB, moveToSol, readLnB)
 import           Yi.Buffer.Misc
-import           Yi.Buffer.Normal
-import           Yi.Buffer.Region
-import           Yi.Rope (YiString)
-import qualified Yi.Rope as R
-import           Yi.String
+import           Yi.Buffer.Normal    ()
+import           Yi.Buffer.Region    (Region (regionStart), mkRegion, modifyRegionB, readRegionB)
+import           Yi.Buffer.TextUnit  (regionWithTwoMovesB)
+import           Yi.Rope             (YiString)
+import qualified Yi.Rope             as R
+import           Yi.String           (mapLines)
 
 {- |
   Return either a \t or the number of spaces specified by tabSize in the
@@ -253,9 +256,17 @@ lastOpenBracketHint input =
   isClosing _   = False
 
 -- | Returns the indentation of a given string. Note that this depends
---on the current indentation settings.
+-- on the current indentation settings.
 indentOfB :: YiString -> BufferM Int
 indentOfB = spacingOfB . R.takeWhile isSpace
+
+makeIndentString :: Int -> BufferM YiString
+makeIndentString level = do
+  IndentSettings et _ sw <- indentSettingsB
+  let (q, r) = level `quotRem` sw
+  if et
+  then return (R.replicate level " ")
+  else return (R.replicate q "\t" <> R.replicate r " ")
 
 -- | Returns the length of a given string taking into account the
 -- white space and the indentation settings.
@@ -273,11 +284,19 @@ spacingOfB text = do
     of the line then we wish to remain pointing to the same character.
 -}
 indentToB :: Int -> BufferM ()
-indentToB level = do
-  indentSettings <- indentSettingsB
-  r <- regionOfB Line
-  when (regionDirection r == Forward) $
-    modifyRegionB (rePadString indentSettings level) r
+indentToB = modifyIndentB . const
+
+-- | Modifies current line indent measured in visible spaces.
+-- Respects indent settings. Calling this with value (+ 4)
+-- will turn "\t" into "\t\t" if shiftwidth is 4 and into
+-- "\t    " if shiftwidth is 8
+-- If current line is empty nothing happens.
+modifyIndentB :: (Int -> Int) -> BufferM ()
+modifyIndentB f = do
+  leadingSpaces <- regionWithTwoMovesB moveToSol firstNonSpaceB
+  newLeadinSpaces <-
+    readRegionB leadingSpaces >>= indentOfB >>= makeIndentString . f
+  modifyRegionB (const newLeadinSpaces) leadingSpaces
 
 -- | Indent as much as the previous line
 indentAsPreviousB :: BufferM ()
@@ -338,12 +357,13 @@ indentString is numOfShifts i = rePadString is newCount i
 shiftIndentOfRegionB :: Int -> Region -> BufferM ()
 shiftIndentOfRegionB shiftCount region = do
     is <- indentSettingsB
-    let i :: R.YiString -> R.YiString
-        i = indentString is shiftCount `unless` R.null
-    modifyRegionB (mapLines i) region
+    let indentFn :: R.YiString -> R.YiString
+        indentFn line = if not (R.null line) && line /= "\n"
+            then indentString is shiftCount line
+            else line
+    modifyRegionB (mapLines indentFn) region
     moveTo $ regionStart region
     firstNonSpaceB
-  where (f `unless` c) x = if c x then x else f x
 
 -- | Return the number of spaces at the beginning of the line, up to
 -- the point.

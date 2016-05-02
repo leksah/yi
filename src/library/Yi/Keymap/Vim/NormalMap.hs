@@ -1,4 +1,4 @@
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS_HADDOCK show-extensions #-}
 
@@ -11,45 +11,47 @@
 
 module Yi.Keymap.Vim.NormalMap (defNormalMap) where
 
-import           Control.Applicative
-import           Control.Lens hiding (re)
-import           Control.Monad
-import           Data.Char
-import           Data.HashMap.Strict (singleton, lookup)
-import           Data.List (group)
-import           Data.Maybe (fromMaybe)
-import           Data.Monoid
-import qualified Data.Text as T
-import           Prelude hiding (null, lookup)
-import           System.Directory (doesFileExist)
-import           System.FriendlyPath (expandTilda)
-import           Yi.Buffer.Adjusted hiding (Insert)
-import           Yi.Core (quitEditor, closeWindow)
+import           Prelude                    hiding (lookup)
+
+import           Control.Applicative        ((<$>))
+import           Control.Lens               (assign, use, (.=))
+import           Control.Monad              (replicateM_, unless, void, when)
+import           Data.Char                  (ord)
+import           Data.HashMap.Strict        (lookup, singleton)
+import           Data.List                  (group)
+import           Data.Maybe                 (fromMaybe)
+import           Data.Monoid                (Monoid (mempty), (<>))
+import qualified Data.Text                  as T (drop, empty, pack, replicate, unpack)
+import           System.Directory           (doesFileExist)
+import           System.FriendlyPath        (expandTilda)
+import           Yi.Buffer.Adjusted         hiding (Insert)
+import           Yi.Core                    (closeWindow, quitEditor)
 import           Yi.Editor
-import           Yi.Event
-import           Yi.File (openNewFile, fwriteE)
-import           Yi.History
-import           Yi.Keymap
-import           Yi.Keymap.Keys
+import           Yi.Event                   (Event (Event), Key (KASCII, KEnter, KEsc, KTab), Modifier (MCtrl))
+import           Yi.File                    (fwriteE, openNewFile)
+import           Yi.History                 (historyPrefixSet, historyStart)
+import           Yi.Keymap                  (YiM)
+import           Yi.Keymap.Keys             (char, ctrlCh, spec)
 import           Yi.Keymap.Vim.Common
-import           Yi.Keymap.Vim.Eval
-import           Yi.Keymap.Vim.Motion
-import           Yi.Keymap.Vim.Operator
-import           Yi.Keymap.Vim.Search
+import           Yi.Keymap.Vim.Eval         (scheduleActionStringForEval)
+import           Yi.Keymap.Vim.Motion       (CountedMove (CountedMove), regionOfMoveB, stringToMove)
+import           Yi.Keymap.Vim.Operator     (VimOperator (..), opChange, opDelete, opYank)
+import           Yi.Keymap.Vim.Search       (doVimSearch)
 import           Yi.Keymap.Vim.StateUtils
-import           Yi.Keymap.Vim.StyledRegion
-import           Yi.Keymap.Vim.Tag
+import           Yi.Keymap.Vim.StyledRegion (StyledRegion (StyledRegion), transformCharactersInLineN)
+import           Yi.Keymap.Vim.Tag          (gotoTag, popTag)
 import           Yi.Keymap.Vim.Utils
-import           Yi.MiniBuffer
-import           Yi.Misc
-import           Yi.Monad
-import           Yi.Regex (seInput, makeSearchOptsM)
-import qualified Yi.Rope as R
-import           Yi.Search (getRegexE, isearchInitE,
-                            setRegexE, makeSimpleSearch)
-import           Yi.String
-import           Yi.Tag (Tag(..))
-import           Yi.Utils (io)
+import           Yi.MiniBuffer              (spawnMinibufferE)
+import           Yi.Misc                    (printFileInfoE)
+import           Yi.Monad                   (maybeM, whenM)
+import           Yi.Regex                   (makeSearchOptsM, seInput)
+import qualified Yi.Rope                    as R (fromText, null, toString, toText)
+import           Yi.Search                  (getRegexE, isearchInitE, makeSimpleSearch, setRegexE)
+import           Yi.String                  (showT)
+import           Yi.Tag                     (Tag (..))
+import           Yi.Utils                   (io)
+
+data EOLStickiness = Sticky | NonSticky deriving Eq
 
 mkDigitBinding :: Char -> VimBinding
 mkDigitBinding c = mkBindingE Normal Continue (char c, return (), mutate)
@@ -103,7 +105,7 @@ zeroBinding = VimBindingE f
                   Nothing -> do
                       withCurrentBuffer moveToSol
                       resetCountE
-                      setStickyEolE False
+                      withCurrentBuffer $ stickyEolA .= False
                       return Drop
           f _ _ = NoMatch
 
@@ -133,9 +135,9 @@ jumpBindings = fmap (mkBindingE Normal Drop)
 
 finishingBingings :: [VimBinding]
 finishingBingings = fmap (mkStringBindingE Normal Finish)
-    [ ("x", cutCharE Forward =<< getCountE, resetCount)
-    , ("<Del>", cutCharE Forward =<< getCountE, resetCount)
-    , ("X", cutCharE Backward =<< getCountE, resetCount)
+    [ ("x", cutCharE Forward NonSticky =<< getCountE, resetCount)
+    , ("<Del>", cutCharE Forward NonSticky =<< getCountE, resetCount)
+    , ("X", cutCharE Backward NonSticky =<< getCountE, resetCount)
 
     , ("D",
         do region <- withCurrentBuffer $ regionWithTwoMovesB (return ()) moveToEol
@@ -213,7 +215,7 @@ continuingBindings = fmap (mkStringBindingE Normal Continue)
     , ("i", return (), switchMode $ Insert 'i')
     , ("<Ins>", return (), switchMode $ Insert 'i')
     , ("I", withCurrentBuffer firstNonSpaceB, switchMode $ Insert 'I')
-    , ("a", withCurrentBuffer rightB, switchMode $ Insert 'a')
+    , ("a", withCurrentBuffer $ moveXorEol 1, switchMode $ Insert 'a')
     , ("A", withCurrentBuffer moveToEol, switchMode $ Insert 'A')
     , ("o", withCurrentBuffer $ do
           moveToEol
@@ -243,7 +245,7 @@ nonrepeatableBindings = fmap (mkBindingE Normal Drop)
         do region <- withCurrentBuffer $ regionWithTwoMovesB (return ()) moveToEol
            void $ operatorApplyToRegionE opChange 1 $ StyledRegion Exclusive region
         , switchMode $ Insert 'C')
-    , (char 's', cutCharE Forward =<< getCountE, switchMode $ Insert 's')
+    , (char 's', cutCharE Forward Sticky =<< getCountE, switchMode $ Insert 's')
     , (char 'S',
         do region <- withCurrentBuffer $ regionWithTwoMovesB firstNonSpaceB moveToEol
            void $ operatorApplyToRegionE opDelete 1 $ StyledRegion Exclusive region
@@ -390,7 +392,7 @@ searchWordE wholeWord dir = do
 
 searchBinding :: VimBinding
 searchBinding = VimBindingE (f . T.unpack . _unEv)
-    where f evs (VimState { vsMode = Normal }) | evs `elem` group "/?"
+    where f evs (VimState { vsMode = Normal }) | evs `elem` group ['/', '?']
             = WholeMatch $ do
                   state <- fmap vsMode getEditorDyn
                   let dir = if evs == "/" then Forward else Backward
@@ -435,8 +437,8 @@ enableVisualE style = withCurrentBuffer $ do
     setVisibleSelection True
     pointB >>= setSelectionMarkPointB
 
-cutCharE :: Direction -> Int -> EditorM ()
-cutCharE dir count = do
+cutCharE :: Direction -> EOLStickiness -> Int -> EditorM ()
+cutCharE dir stickiness count = do
     r <- withCurrentBuffer $ do
         p0 <- pointB
         (if dir == Forward then moveXorEol else moveXorSol) count
@@ -444,7 +446,7 @@ cutCharE dir count = do
         let region = mkRegion p0 p1
         rope <- readRegionB region
         deleteRegionB $ mkRegion p0 p1
-        leftOnEol
+        when (stickiness == NonSticky) leftOnEol
         return rope
     regName <- fmap vsActiveRegister getEditorDyn
     setRegisterE regName Inclusive r
@@ -452,7 +454,7 @@ cutCharE dir count = do
 tabTraversalBinding :: VimBinding
 tabTraversalBinding = VimBindingE (f . T.unpack . _unEv)
     where f "g" (VimState { vsMode = Normal }) = PartialMatch
-          f ('g':c:[]) (VimState { vsMode = Normal }) | c `elem` "tT" = WholeMatch $ do
+          f ('g':c:[]) (VimState { vsMode = Normal }) | c `elem` ['t', 'T'] = WholeMatch $ do
               count <- getCountE
               replicateM_ count $ if c == 'T' then previousTabE else nextTabE
               resetCountE

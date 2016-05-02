@@ -1,15 +1,14 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveFoldable #-}
-{-# LANGUAGE DeriveFunctor #-}
-{-# LANGUAGE DeriveTraversable #-}
-{-# LANGUAGE ExistentialQuantification #-}
-{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE CPP                        #-}
+{-# LANGUAGE DeriveDataTypeable         #-}
+{-# LANGUAGE DeriveFoldable             #-}
+{-# LANGUAGE DeriveFunctor              #-}
+{-# LANGUAGE DeriveTraversable          #-}
+{-# LANGUAGE ExistentialQuantification  #-}
+{-# LANGUAGE FlexibleContexts           #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE LambdaCase                 #-}
+{-# LANGUAGE MultiParamTypeClasses      #-}
+{-# LANGUAGE ScopedTypeVariables        #-}
 {-# OPTIONS_HADDOCK show-extensions #-}
 
 -- |
@@ -27,49 +26,50 @@
 
 module Yi.Types where
 
-import           Control.Applicative
-import           Control.Concurrent
-import           Control.Monad.Base
-import           Control.Monad.RWS.Strict (RWS, MonadWriter)
-import           Control.Monad.Reader
-import           Control.Monad.State
-import qualified Data.DynamicState as ConfigState
-import qualified Data.DynamicState.Serializable as DynamicState
-import           Data.Binary (Binary)
-import qualified Data.Binary as B
-import           Data.Default
-import qualified Data.DelayList as DelayList
-import           Data.Foldable
-import           Data.Function (on)
-import           Data.List.NonEmpty
-import           Data.List.PointedList
-import qualified Data.Map as M
-import qualified Data.Text as T
-import qualified Data.Text.Encoding as E
-import           Data.Time
-import           Data.Traversable
-import           Data.Typeable
-import           Data.Word
 #ifdef FRONTEND_VTY
-import qualified Graphics.Vty as Vty
+import qualified Graphics.Vty as Vty (Config)
 #endif
-import           Yi.Buffer.Basic (BufferRef, WindowRef)
+
+import           Control.Applicative            (Applicative, pure, (<$>), (<*>))
+import           Control.Concurrent             (MVar, modifyMVar, modifyMVar_, readMVar)
+import           Control.Monad.Base             (MonadBase, liftBase)
+import           Control.Monad.Reader           (MonadReader, ReaderT, ask, asks, runReaderT)
+import           Control.Monad.RWS.Strict       (MonadWriter, RWS, ap, liftM3, void)
+import           Control.Monad.State            (MonadState (..), State, forever, runState)
+import           Data.Binary                    (Binary)
+import qualified Data.Binary                    as B (get, put)
+import           Data.Default                   (Default, def)
+import qualified Data.DelayList                 as DelayList (DelayList)
+import qualified Data.DynamicState              as ConfigState (DynamicState)
+import qualified Data.DynamicState.Serializable as DynamicState (DynamicState)
+import           Data.Foldable                  (Foldable)
+import           Data.Function                  (on)
+import           Data.List.NonEmpty             (NonEmpty)
+import           Data.List.PointedList          (PointedList)
+import qualified Data.Map                       as M (Map)
+import qualified Data.Text                      as T (Text)
+import qualified Data.Text.Encoding             as E (decodeUtf8, encodeUtf8)
+import           Data.Time                      (UTCTime (..))
+import           Data.Traversable               (Traversable)
+import           Data.Typeable                  (Typeable)
+import           Data.Word                      (Word8)
+import           Yi.Buffer.Basic                (BufferRef, WindowRef)
 import           Yi.Buffer.Implementation
-import           Yi.Buffer.Undo
-import           Yi.Config.Misc
-import           Yi.Event
-import qualified Yi.Interact as I
-import           Yi.KillRing
-import           Yi.Layout
-import           Yi.Monad
-import           Yi.Process (SubprocessInfo, SubprocessId)
-import qualified Yi.Rope as R
-import           Yi.Style
-import           Yi.Style.Library
-import           Yi.Syntax
-import           Yi.Tab
-import           Yi.UI.Common
-import           Yi.Window
+import           Yi.Buffer.Undo                 (URList)
+import           Yi.Config.Misc                 (ScrollStyle)
+import           Yi.Event                       (Event)
+import qualified Yi.Interact                    as I (I, P (End))
+import           Yi.KillRing                    (Killring)
+import           Yi.Layout                      (AnyLayoutManager)
+import           Yi.Monad                       (getsAndModify)
+import           Yi.Process                     (SubprocessId, SubprocessInfo)
+import qualified Yi.Rope                        as R (ConverterName, YiString)
+import           Yi.Style                       (StyleName)
+import           Yi.Style.Library               (Theme)
+import           Yi.Syntax                      (ExtHL, Stroke)
+import           Yi.Tab                         (Tab)
+import           Yi.UI.Common                   (UI)
+import           Yi.Window                      (Window)
 
 
 -- Yi.Keymap
@@ -206,41 +206,48 @@ instance Binary a => Binary (MarkSet a) where
   put (MarkSet f i s) = B.put f >> B.put i >> B.put s
   get = liftM3 MarkSet B.get B.get B.get
 
-data Attributes = Attributes
-                { ident :: !BufferId
-                , bkey__   :: !BufferRef          -- ^ immutable unique key
-                , undos  :: !URList               -- ^ undo/redo list
-                , bufferDynamic :: !DynamicState.DynamicState  -- ^ dynamic components
-                , preferCol :: !(Maybe Int)       -- ^ prefered column to arrive at when we do a lineDown / lineUp
-                , preferVisCol :: !(Maybe Int)    -- ^ prefered column to arrive at visually (ie, respecting wrap)
-                , pendingUpdates :: ![UIUpdate]   -- ^ updates that haven't been synched in the UI yet
-                , selectionStyle :: !SelectionStyle
-                , keymapProcess :: !KeymapProcess
-                , winMarks :: !(M.Map WindowRef WinMarks)
-                , lastActiveWindow :: !Window
-                , lastSyncTime :: !UTCTime        -- ^ time of the last synchronization with disk
-                , readOnly :: !Bool               -- ^ read-only flag
-                , inserting                 :: !Bool -- ^ the keymap is ready for insertion into this buffer
-                , directoryContent          :: !Bool -- ^ does buffer contain directory contents
-                , pointFollowsWindow        :: !(WindowRef -> Bool)
-                , updateTransactionInFlight :: !Bool
-                , updateTransactionAccum    :: ![Update]
-                , fontsizeVariation         :: !Int
-                , encodingConverterName     :: Maybe R.ConverterName
-                  -- ^ How many points (frontend-specific) to change
-                  -- the font by in this buffer
-                } deriving Typeable
+data Attributes
+    = Attributes
+    { ident :: !BufferId
+    , bkey__   :: !BufferRef -- ^ immutable unique key
+    , undos  :: !URList -- ^ undo/redo list
+    , bufferDynamic :: !DynamicState.DynamicState -- ^ dynamic components
+    , preferCol :: !(Maybe Int)
+    -- ^ prefered column to arrive at when we do a lineDown / lineUp
+    , preferVisCol :: !(Maybe Int)
+    -- ^ prefered column to arrive at visually (ie, respecting wrap)
+    , stickyEol :: !Bool
+    -- ^ stick to the end of line (used by vim bindings mostly)
+    , pendingUpdates :: ![UIUpdate]
+    -- ^ updates that haven't been synched in the UI yet
+    , selectionStyle :: !SelectionStyle
+    , keymapProcess :: !KeymapProcess
+    , winMarks :: !(M.Map WindowRef WinMarks)
+    , lastActiveWindow :: !Window
+    , lastSyncTime :: !UTCTime
+    -- ^ time of the last synchronization with disk
+    , readOnly :: !Bool -- ^ read-only flag
+    , inserting :: !Bool -- ^ the keymap is ready for insertion into this buffer
+    , directoryContent :: !Bool -- ^ does buffer contain directory contents
+    , pointFollowsWindow :: !(WindowRef -> Bool)
+    , updateTransactionInFlight :: !Bool
+    , updateTransactionAccum :: ![Update]
+    , fontsizeVariation :: !Int
+    , encodingConverterName :: Maybe R.ConverterName
+      -- ^ How many points (frontend-specific) to change
+      -- the font by in this buffer
+    } deriving Typeable
 
 
 instance Binary Yi.Types.Attributes where
-    put (Yi.Types.Attributes n b u bd pc pv pu selectionStyle_
+    put (Yi.Types.Attributes n b u bd pc pv se pu selectionStyle_
          _proc wm law lst ro ins _dc _pfw isTransacPresent transacAccum fv cn) = do
       let putTime (UTCTime x y) = B.put (fromEnum x) >> B.put (fromEnum y)
       B.put n >> B.put b >> B.put u >> B.put bd
-      B.put pc >> B.put pv >> B.put pu >> B.put selectionStyle_ >> B.put wm
+      B.put pc >> B.put pv >> B.put se >> B.put pu >> B.put selectionStyle_ >> B.put wm
       B.put law >> putTime lst >> B.put ro >> B.put ins >> B.put _dc
       B.put isTransacPresent >> B.put transacAccum >> B.put fv >> B.put cn
-    get = Yi.Types.Attributes <$> B.get <*> B.get <*> B.get <*>
+    get = Yi.Types.Attributes <$> B.get <*> B.get <*> B.get <*> B.get <*>
           B.get <*> B.get <*> B.get <*> B.get <*> B.get <*> pure I.End <*> B.get <*> B.get
           <*> getTime <*> B.get <*> B.get <*> B.get
           <*> pure (const False) <*> B.get <*> B.get <*> B.get <*> B.get
@@ -249,7 +256,7 @@ instance Binary Yi.Types.Attributes where
 
 data BufferId = MemBuffer T.Text
               | FileBuffer FilePath
-              deriving (Show, Eq)
+              deriving (Show, Eq, Ord)
 
 instance Binary BufferId where
   get = B.get >>= \case
@@ -352,17 +359,11 @@ data Editor = Editor
 
 newtype EditorM a = EditorM {fromEditorM :: ReaderT Config (State Editor) a}
     deriving (Monad, Applicative, MonadState Editor,
-              MonadReader Config, Functor)
+              MonadReader Config, Functor, Typeable)
 
 instance MonadEditor EditorM where
     askCfg = ask
     withEditor = id
-
-#if __GLASGOW_HASKELL__ < 708
-deriving instance Typeable1 EditorM
-#else
-deriving instance Typeable EditorM
-#endif
 
 class (Monad m, MonadState Editor m) => MonadEditor m where
   askCfg :: m Config

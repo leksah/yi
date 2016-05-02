@@ -1,13 +1,12 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE CPP                       #-}
+{-# LANGUAGE DeriveDataTypeable        #-}
+{-# LANGUAGE DeriveGeneric             #-}
 {-# LANGUAGE ExistentialQuantification #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE PatternGuards #-}
-{-# LANGUAGE Rank2Types #-}
-{-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE FlexibleContexts          #-}
+{-# LANGUAGE FlexibleInstances         #-}
+{-# LANGUAGE PatternGuards             #-}
+{-# LANGUAGE Rank2Types                #-}
+{-# LANGUAGE TemplateHaskell           #-}
 {-# OPTIONS_HADDOCK show-extensions #-}
 
 -- |
@@ -28,7 +27,7 @@ module Yi.Buffer.Implementation
   , Size
   , Direction (..)
   , BufferImpl
-  , Overlay, OvlLayer (..)
+  , Overlay (..)
   , mkOverlay
   , overlayUpdate
   , applyUpdateI
@@ -51,7 +50,8 @@ module Yi.Buffer.Implementation
   , setSyntaxBI
   , addOverlayBI
   , delOverlayBI
-  , delOverlayLayer
+  , delOverlaysOfOwnerBI
+  , getOverlaysOfOwnerBI
   , updateSyntax
   , getAst, focusAst
   , strokesRangesBI
@@ -64,74 +64,71 @@ module Yi.Buffer.Implementation
   , mem
   ) where
 
-import           Control.Applicative
-import           Data.Array
-import           Data.Binary
-#if __GLASGOW_HASKELL__ < 708
-import           Data.DeriveTH
-#else
-import           GHC.Generics (Generic)
-#endif
-import           Data.Function
-import           Data.List (groupBy)
-import qualified Data.Map as M
-import           Data.Maybe
-import           Data.Monoid
-import           Yi.Rope (YiString)
-import qualified Yi.Rope as R
-import qualified Data.Set as Set
-import           Data.Typeable
-import           Yi.Buffer.Basic
-import           Yi.Regex
-import           Yi.Region
-import           Yi.Style
-import           Yi.Syntax
-import           Yi.Utils
+import           GHC.Generics        (Generic)
 
-data MarkValue = MarkValue { markPoint :: !Point
+import           Control.Applicative (Applicative ((<*>), pure), (<$>))
+import           Data.Array          ((!))
+import           Data.Binary         (Binary (..))
+import           Data.Function       (on)
+import           Data.List           (groupBy)
+import qualified Data.Map            as M (Map, delete, empty, findMax, insert, lookup, map, maxViewWithKey)
+import           Data.Maybe          (fromMaybe)
+import           Data.Monoid         (Monoid (mconcat, mempty))
+import qualified Data.Set            as Set (Set, delete, empty, filter, insert, map, toList)
+import           Data.Typeable       (Typeable)
+import           Yi.Buffer.Basic     (Direction (..), Mark (..), WindowRef, reverseDir)
+import           Yi.Regex            (RegexLike (matchAll), SearchExp, searchRegex)
+import           Yi.Region           (Region (..), fmapRegion, mkRegion, nearRegion, regionSize)
+import           Yi.Rope             (YiString)
+import qualified Yi.Rope             as R
+import           Yi.Style            (StyleName, UIStyle (hintStyle, strongHintStyle))
+import           Yi.Syntax
+import           Yi.Utils            (SemiNum ((+~), (~-)), makeLensesWithSuffix, mapAdjust')
+
+
+data MarkValue = MarkValue { markPoint   :: !Point
                            , markGravity :: !Direction}
-               deriving (Ord, Eq, Show, Typeable)
+               deriving (Ord, Eq, Show, Typeable, Generic)
 
 makeLensesWithSuffix "AA" ''MarkValue
 
-#if __GLASGOW_HASKELL__ < 708
-$(derive makeBinary ''MarkValue)
-#else
-deriving instance Generic MarkValue
 instance Binary MarkValue
-#endif
 
 type Marks = M.Map Mark MarkValue
 
 data HLState syntax = forall cache. HLState !(Highlighter cache syntax) !cache
 
-data OvlLayer = UserLayer | HintLayer
-  deriving (Ord, Eq)
-data Overlay = Overlay {
-                        overlayLayer :: OvlLayer,
-                        -- underscores to avoid 'defined but not used'. Remove if desired
-                        _overlayBegin :: MarkValue,
-                        _overlayEnd :: MarkValue,
-                        _overlayStyle :: StyleName
-                       }
+data Overlay = Overlay
+    { overlayOwner      :: R.YiString
+    , overlayBegin     :: MarkValue
+    , overlayEnd       :: MarkValue
+    , overlayStyle     :: StyleName
+    , overlayAnnotation :: R.YiString
+    }
+
 instance Eq Overlay where
-    Overlay a b c _ == Overlay a' b' c' _ = a == a' && b == b' && c == c'
+    Overlay a b c _ msg == Overlay a' b' c' _ msg' =
+        a == a' && b == b' && c == c' && msg == msg'
 
 instance Ord Overlay where
-    compare (Overlay a b c _) (Overlay a' b' c' _)
-        = compare a a' `mappend` compare b b' `mappend` compare c c'
+    compare (Overlay a b c _ msg) (Overlay a' b' c' _ msg')
+        = mconcat
+            [ compare a a'
+            , compare b b'
+            , compare c c'
+            , compare msg msg'
+            ]
 
-
-data BufferImpl syntax =
-        FBufferData { mem        :: !YiString          -- ^ buffer text
-                    , marks      :: !Marks                 -- ^ Marks for this buffer
-                    , markNames  :: !(M.Map String Mark)
-                    , hlCache    :: !(HLState syntax)       -- ^ syntax highlighting state
-                    , overlays   :: !(Set.Set Overlay) -- ^ set of (non overlapping) visual overlay regions
-                    , dirtyOffset :: !Point -- ^ Lowest modified offset since last recomputation of syntax
-                    }
-        deriving Typeable
-
+data BufferImpl syntax = FBufferData
+    { mem         :: !YiString -- ^ buffer text
+    , marks       :: !Marks -- ^ Marks for this buffer
+    , markNames   :: !(M.Map String Mark)
+    , hlCache     :: !(HLState syntax) -- ^ syntax highlighting state
+    , overlays    :: !(Set.Set Overlay)
+    -- ^ set of (non overlapping) visual overlay regions
+    , dirtyOffset :: !Point
+    -- ^ Lowest modified offset since last recomputation of syntax
+    } deriving Typeable
 
 dummyHlState :: HLState syntax
 dummyHlState = HLState noHighlighter (hlStartState noHighlighter)
@@ -142,8 +139,6 @@ instance Binary (BufferImpl ()) where
     put b = put (mem b) >> put (marks b) >> put (markNames b)
     get = FBufferData <$> get <*> get <*> get <*> pure dummyHlState <*> pure Set.empty <*> pure 0
 
-
-
 -- | Mutation actions (also used the undo or redo list)
 --
 -- For the undo/redo, we use the /partial checkpoint/ (Berlage, pg16) strategy to store
@@ -152,20 +147,23 @@ instance Binary (BufferImpl ()) where
 -- Note that the update direction is only a hint for moving the cursor
 -- (mainly for undo purposes); the insertions and deletions are always
 -- applied Forward.
-data Update = Insert {updatePoint :: !Point, updateDirection :: !Direction, insertUpdateString :: !YiString}
-            | Delete {updatePoint :: !Point, updateDirection :: !Direction, deleteUpdateString :: !YiString}
-              -- Note that keeping the text does not cost much: we keep the updates in the undo list;
-              -- if it's a "Delete" it means we have just inserted the text in the buffer, so the update shares
-              -- the data with the buffer. If it's an "Insert" we have to keep the data any way.
+--
+-- Note that keeping the text does not cost much: we keep the updates in the undo list;
+-- if it's a "Delete" it means we have just inserted the text in the buffer, so the update shares
+-- the data with the buffer. If it's an "Insert" we have to keep the data any way.
+data Update
+    = Insert
+    { updatePoint :: !Point
+    , updateDirection :: !Direction
+    , _insertUpdateString :: !YiString
+    }
+    | Delete
+    { updatePoint :: !Point
+    , updateDirection :: !Direction
+    , _deleteUpdateString :: !YiString
+    } deriving (Show, Typeable, Generic)
 
-              deriving (Show, Typeable)
-
-#if __GLASGOW_HASKELL__ < 708
-$(derive makeBinary ''Update)
-#else
-deriving instance Generic Update
 instance Binary Update
-#endif
 
 updateIsDelete :: Update -> Bool
 updateIsDelete Delete {} = True
@@ -180,12 +178,8 @@ updateSize = Size . fromIntegral . R.length . updateString
 
 data UIUpdate = TextUpdate !Update
               | StyleUpdate !Point !Size
-#if __GLASGOW_HASKELL__ < 708
-$(derive makeBinary ''UIUpdate)
-#else
-deriving instance Generic UIUpdate
+    deriving (Generic)
 instance Binary UIUpdate
-#endif
 
 --------------------------------------------------
 -- Low-level primitives.
@@ -222,7 +216,7 @@ shiftMarkValue from by (MarkValue p gravity) = MarkValue shifted gravity
               where p' = max from (p +~ by)
 
 mapOvlMarks :: (MarkValue -> MarkValue) -> Overlay -> Overlay
-mapOvlMarks f (Overlay l s e v) = Overlay l (f s) (f e) v
+mapOvlMarks f (Overlay _owner s e v msg) = Overlay _owner (f s) (f e) v msg
 
 -------------------------------------
 -- * "high-level" (exported) operations
@@ -251,12 +245,16 @@ getIndexedStream Backward (Point p) = zip (dF (pred (Point p))) . R.toReverseStr
       dF n = n : dF (pred n)
 
 -- | Create an "overlay" for the style @sty@ between points @s@ and @e@
-mkOverlay :: OvlLayer -> Region -> StyleName -> Overlay
-mkOverlay l r = Overlay l (MarkValue (regionStart r) Backward) (MarkValue (regionEnd r) Forward)
+mkOverlay :: R.YiString -> Region -> StyleName -> R.YiString -> Overlay
+mkOverlay owner r =
+    Overlay owner
+        (MarkValue (regionStart r) Backward)
+        (MarkValue (regionEnd r) Forward)
 
 -- | Obtain a style-update for a specific overlay
 overlayUpdate :: Overlay -> UIUpdate
-overlayUpdate (Overlay _l (MarkValue s _) (MarkValue e _) _) = StyleUpdate s (e ~- s)
+overlayUpdate (Overlay _owner (MarkValue s _) (MarkValue e _) _ _ann) =
+    StyleUpdate s (e ~- s)
 
 -- | Add a style "overlay" between the given points.
 addOverlayBI :: Overlay -> BufferImpl syntax -> BufferImpl syntax
@@ -266,8 +264,14 @@ addOverlayBI ov fb = fb{overlays = Set.insert ov (overlays fb)}
 delOverlayBI :: Overlay -> BufferImpl syntax -> BufferImpl syntax
 delOverlayBI ov fb = fb{overlays = Set.delete ov (overlays fb)}
 
-delOverlayLayer :: OvlLayer -> BufferImpl syntax -> BufferImpl syntax
-delOverlayLayer layer fb = fb{overlays = Set.filter ((/= layer) . overlayLayer) (overlays fb)}
+delOverlaysOfOwnerBI :: R.YiString -> BufferImpl syntax -> BufferImpl syntax
+delOverlaysOfOwnerBI owner fb =
+    fb{overlays = Set.filter ((/= owner) . overlayOwner) (overlays fb)}
+
+getOverlaysOfOwnerBI :: R.YiString -> BufferImpl syntax -> Set.Set Overlay
+getOverlaysOfOwnerBI owner fb =
+    Set.filter ((== owner) . overlayOwner) (overlays fb)
+
 -- FIXME: this can be really inefficient.
 
 -- | Return style information for the range @(i,j)@ Style information
@@ -291,12 +295,13 @@ strokesRangesBI getStrokes regex rgn  point fb = result
     -- zero-length spans seem to break stroking in general, so filter them out!
     syntaxHlLayer = filter (\(Span b _m a) -> b /= a)  $ getStrokes point i j
 
-    layers2 = map (map overlayStroke) $ groupBy ((==) `on` overlayLayer) $  Set.toList $ overlays fb
+    layers2 = map (map overlayStroke) $ groupBy ((==) `on` overlayOwner) $  Set.toList $ overlays fb
     layer3 = case regex of
                Just re -> takeIn $ map hintStroke $ regexRegionBI re (mkRegion i j) fb
                Nothing -> []
     result = map (map clampStroke . takeIn . dropBefore) (layer3 : layers2 ++ [syntaxHlLayer, groundLayer])
-    overlayStroke (Overlay _ sm  em a) = Span (markPoint sm) a (markPoint em)
+    overlayStroke (Overlay _owner sm  em a _msg) =
+        Span (markPoint sm) a (markPoint em)
     clampStroke (Span l x r) = Span (max i l) x (min j r)
     hintStroke r = Span (regionStart r) (if point `nearRegion` r then strongHintStyle else hintStyle) (regionEnd r)
 

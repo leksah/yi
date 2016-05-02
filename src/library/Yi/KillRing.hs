@@ -1,7 +1,5 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE CPP                #-}
+{-# LANGUAGE TemplateHaskell    #-}
 {-# OPTIONS_HADDOCK show-extensions #-}
 
 -- |
@@ -26,19 +24,15 @@ module Yi.KillRing ( Killring
                    )
     where
 
-import           Control.Applicative
-import           Control.Lens
-import           Data.Binary
-#if __GLASGOW_HASKELL__ < 708
-import           Data.DeriveTH
-#else
-import           GHC.Generics (Generic)
-#endif
-import           Data.List.NonEmpty hiding (length, drop)
-import           Data.Monoid
-import           Prelude hiding (head, tail, take)
-import           Yi.Buffer.Basic
-import qualified Yi.Rope as R
+import           Prelude             hiding (head, tail, take)
+
+import           Control.Applicative ((<$>), (<*>))
+import           Control.Lens        (makeLenses, (^.))
+import           Data.Binary         (Binary, get, put)
+import           Data.List.NonEmpty  (NonEmpty (..), head, take)
+import           Data.Monoid         (mempty, (<>))
+import           Yi.Buffer.Basic     (Direction (..))
+import qualified Yi.Rope             as R (YiString, length)
 
 
 data Killring = Killring { _krKilled :: Bool
@@ -55,12 +49,6 @@ instance Binary Killring where
         in Killring <$> get <*> get <*> getNE <*> get
 
 makeLenses ''Killring
-
-#if __GLASGOW_HASKELL__ < 708
-$(derive makeBinary ''NonEmpty)
-#else
-deriving instance Generic Killring
-#endif
 
 maxDepth :: Int
 maxDepth = 10

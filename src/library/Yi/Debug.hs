@@ -1,5 +1,6 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE CPP               #-}
+{-# LANGUAGE FlexibleContexts  #-}
+{-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS_HADDOCK show-extensions #-}
 
@@ -15,16 +16,23 @@
 module Yi.Debug ( initDebug, trace, traceM, traceM_, logPutStrLn
                 , logError, logStream, Yi.Debug.error ) where
 
-import           Control.Concurrent
-import           Control.Monad.Base
-import           Data.IORef
-import           Data.Monoid
-import qualified Data.Text as T
-import           Data.Time
-import           GHC.Conc (labelThread)
-import           System.IO
-import           System.IO.Unsafe (unsafePerformIO)
-import           System.Locale
+import Control.Concurrent
+    ( dupChan, getChanContents, forkIO, myThreadId, Chan )
+import Control.Monad.Base ( liftBase, MonadBase )
+import Data.IORef ( readIORef, writeIORef, IORef, newIORef )
+import Data.Monoid ( (<>) )
+import qualified Data.Text as T ( pack, snoc, unpack, Text )
+import GHC.Conc ( labelThread )
+import System.IO
+    ( hFlush, hPutStrLn, IOMode(WriteMode), openFile, Handle )
+import System.IO.Unsafe ( unsafePerformIO )
+
+#if __GLASGOW_HASKELL__ < 710
+import Data.Time (formatTime, getCurrentTime)
+import System.Locale (defaultTimeLocale)
+#else
+import Data.Time (formatTime, getCurrentTime, defaultTimeLocale)
+#endif
 
 dbgHandle :: IORef (Maybe Handle)
 dbgHandle = unsafePerformIO $ newIORef Nothing

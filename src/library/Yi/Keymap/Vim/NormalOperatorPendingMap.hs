@@ -11,23 +11,23 @@
 module Yi.Keymap.Vim.NormalOperatorPendingMap
        (defNormalOperatorPendingMap) where
 
-import           Control.Applicative
-import           Control.Monad
-import           Data.Char (isDigit)
-import           Data.List (isPrefixOf)
-import           Data.Maybe (fromMaybe, fromJust)
-import           Data.Monoid
-import qualified Data.Text as T
-import           Yi.Buffer.Adjusted hiding (Insert)
-import           Yi.Editor
-import           Yi.Keymap.Keys
+import           Control.Applicative        ((<$>))
+import           Control.Monad              (void, when)
+import           Data.Char                  (isDigit)
+import           Data.List                  (isPrefixOf)
+import           Data.Maybe                 (fromJust, fromMaybe)
+import           Data.Monoid                ((<>))
+import qualified Data.Text                  as T (init, last, pack, snoc, unpack)
+import           Yi.Buffer.Adjusted         hiding (Insert)
+import           Yi.Editor                  (getEditorDyn, withCurrentBuffer)
+import           Yi.Keymap.Keys             (Key (KEsc), spec)
 import           Yi.Keymap.Vim.Common
 import           Yi.Keymap.Vim.Motion
 import           Yi.Keymap.Vim.Operator
 import           Yi.Keymap.Vim.StateUtils
-import           Yi.Keymap.Vim.StyledRegion
+import           Yi.Keymap.Vim.StyledRegion (StyledRegion (..), normalizeRegion)
 import           Yi.Keymap.Vim.TextObject
-import           Yi.Keymap.Vim.Utils
+import           Yi.Keymap.Vim.Utils        (mkBindingE)
 
 defNormalOperatorPendingMap :: [VimOperator] -> [VimBinding]
 defNormalOperatorPendingMap operators = [textObject operators, escBinding]
@@ -165,7 +165,7 @@ splitCountModifierCommand = go "" Nothing [""]
     where go "" Nothing mods "0" = (Nothing, head mods, "0")
           go ds count mods (h:t) | isDigit h = go (ds <> [h]) count mods t
           go ds@(_:_) count mods s@(h:_) | not (isDigit h) = go [] (maybeMult count (Just (read ds))) mods s
-          go [] count mods (h:t) | h `elem` "vV" = go [] count ([h]:mods) t
+          go [] count mods (h:t) | h `elem` ['v', 'V'] = go [] count ([h]:mods) t
           go [] count mods s | "<C-v>" `isPrefixOf` s = go [] count ("<C-v>":mods) (drop 5 s)
           go [] count mods s = (count, head mods, s)
           go ds count mods [] = (maybeMult count (Just (read ds)), head mods, [])

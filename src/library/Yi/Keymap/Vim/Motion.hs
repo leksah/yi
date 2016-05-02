@@ -49,16 +49,17 @@ module Yi.Keymap.Vim.Motion
     , changeMoveStyle
     ) where
 
-import           Control.Applicative
-import           Control.Lens
-import           Control.Monad
-import           Data.Maybe (fromMaybe)
-import           Data.Monoid
-import qualified Data.Text as T
-import           Prelude hiding (repeat)
+import           Prelude                    hiding (repeat)
+
+import           Control.Applicative        (Alternative ((<|>)), Applicative ((<*>)), (<$>))
+import           Control.Lens               (Field3 (_3), over, use)
+import           Control.Monad              (replicateM_, void, when, (<=<))
+import           Data.Maybe                 (fromMaybe)
+import           Data.Monoid                ((<>))
+import qualified Data.Text                  as T (unpack)
 import           Yi.Buffer.Adjusted
-import           Yi.Keymap.Vim.Common
-import           Yi.Keymap.Vim.StyledRegion
+import           Yi.Keymap.Vim.Common       (EventString (_unEv), MatchResult (..), lookupBestMatch)
+import           Yi.Keymap.Vim.StyledRegion (StyledRegion (..), normalizeRegion)
 
 data Move = Move {
     moveStyle :: !RegionStyle
@@ -189,7 +190,7 @@ withDefaultCount :: (EventString, Bool, Int -> BufferM ()) -> (EventString, Bool
 withDefaultCount = over _3 (. fromMaybe 1)
 
 matchGotoMarkMove :: String -> MatchResult Move
-matchGotoMarkMove (m:_) | m `notElem` "'`" = NoMatch
+matchGotoMarkMove (m:_) | m `notElem` ['\'', '`'] = NoMatch
 matchGotoMarkMove (_:[]) = PartialMatch
 matchGotoMarkMove (m:c:[]) = WholeMatch $ Move style True action
     where style = if m == '`' then Inclusive else LineWise
@@ -201,9 +202,9 @@ matchGotoMarkMove (m:c:[]) = WholeMatch $ Move style True action
 matchGotoMarkMove _ = NoMatch
 
 matchGotoCharMove :: String -> MatchResult Move
-matchGotoCharMove (m:[]) | m `elem` "fFtT" = PartialMatch
-matchGotoCharMove (m:"<lt>") | m `elem` "fFtT" = matchGotoCharMove (m:"<")
-matchGotoCharMove (m:c:[]) | m `elem` "fFtT" = WholeMatch $ Move style False action
+matchGotoCharMove (m:[]) | m `elem` ('f' : "FtT") = PartialMatch
+matchGotoCharMove (m:"<lt>") | m `elem` ('f' : "FtT") = matchGotoCharMove (m:"<")
+matchGotoCharMove (m:c:[]) | m `elem` ('f' : "FtT") = WholeMatch $ Move style False action
     where (dir, style, move) =
               case m of
                   'f' -> (Forward, Inclusive, nextCInLineInc c)

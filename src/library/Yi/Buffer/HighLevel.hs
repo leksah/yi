@@ -1,7 +1,7 @@
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# OPTIONS_HADDOCK show-extensions #-}
-{-# LANGUAGE MultiWayIf #-}
+{-# LANGUAGE MultiWayIf        #-}
 
 -- |
 -- Module      :  Yi.Buffer.HighLevel
@@ -17,6 +17,7 @@ module Yi.Buffer.HighLevel
     , atEol
     , atLastLine
     , atSol
+    , atSof
     , bdeleteB
     , bdeleteLineB
     , bkillWordB
@@ -64,14 +65,19 @@ module Yi.Buffer.HighLevel
     , modifyExtendedSelectionB
     , moveNonspaceOrSol
     , movePercentageFileB
+    , moveToMTB
     , moveToEol
     , moveToSol
     , moveXorEol
     , moveXorSol
+    , nextCExc
+    , nextCInc
     , nextCInLineExc
     , nextCInLineInc
     , nextNParagraphs
     , nextWordB
+    , prevCExc
+    , prevCInc
     , prevCInLineExc
     , prevCInLineInc
     , prevNParagraphs
@@ -111,40 +117,53 @@ module Yi.Buffer.HighLevel
     , upScreensB
     , vimScrollB
     , vimScrollByB
+    , markWord
     , atSof
     , readCharB
     , nextPointB
     , prevPointB
     ) where
 
-import           Control.Applicative
-import           Control.Lens hiding ((-~), (+~), re, transform)
-import           Control.Lens.Cons (_last)
-import           Control.Monad
+import           Control.Applicative      (Applicative ((<*>)), (<$>))
+import           Control.Lens             (assign, over, use, (%=), (.=))
+import           Control.Lens.Cons        (_last)
+import           Control.Monad            (forM, forM_, replicateM_, unless, void, when)
 import           Control.Monad.RWS.Strict (ask)
-import           Control.Monad.State hiding (forM, forM_, sequence_)
-import           Data.Char (isDigit, isHexDigit, isOctDigit,
-                            toUpper, isUpper, toLower, isSpace)
-import           Data.List (sort, intersperse)
-import           Data.Maybe (fromMaybe, listToMaybe, catMaybes, fromJust)
-import           Data.Monoid
-import qualified Data.Text as T
-import           Data.Time (UTCTime)
-import           Data.Tuple (swap)
-import           Numeric (showOct, showHex, readOct, readHex)
-import           Yi.Buffer.Basic
+import           Control.Monad.State      (gets)
+import           Data.Char                (isDigit, isHexDigit, isOctDigit, isSpace, isUpper, toLower, toUpper)
+import           Data.List                (intersperse, sort)
+import           Data.Maybe               (catMaybes, fromMaybe, listToMaybe)
+import           Data.Monoid              (Monoid (mempty), (<>))
+import qualified Data.Text                as T (Text, toLower, toUpper, unpack)
+import           Data.Time                (UTCTime)
+import           Data.Tuple               (swap)
+import           Numeric                  (readHex, readOct, showHex, showOct)
+import           Yi.Buffer.Basic          (Direction (..), Mark, Point (..), Size (Size))
 import           Yi.Buffer.Misc
 import           Yi.Buffer.Normal
 import           Yi.Buffer.Region
-import           Yi.Config.Misc (ScrollStyle(SingleLine))
-import           Yi.Rope (YiString)
-import qualified Yi.Rope as R
-import           Yi.String
-import           Yi.Utils
-import           Yi.Window
+import           Yi.Config.Misc           (ScrollStyle (SingleLine))
+import           Yi.Rope                  (YiString)
+import qualified Yi.Rope                  as R
+import           Yi.String                (capitalizeFirst, fillText, isBlank, mapLines, onLines, overInit)
+import           Yi.Utils                 (SemiNum ((+~), (-~)))
+import           Yi.Window                (Window (actualLines, width, wkey))
 
 -- ---------------------------------------------------------------------
 -- Movement operations
+
+
+-- | Move point between the middle, top and bottom of the screen
+-- If the point stays at the middle, it'll be gone to the top
+-- else if the point stays at the top, it'll be gone to the bottom
+-- else it'll be gone to the middle
+moveToMTB :: BufferM ()
+moveToMTB = (==) <$> curLn <*> screenMidLn >>= \case
+    True -> downFromTosB 0
+    _    -> (==) <$> curLn <*> screenTopLn >>= \case
+                True -> upFromBosB 0
+                _    -> downFromTosB =<< (-) <$> screenMidLn <*> screenTopLn
+
 
 -- | Move point to start of line
 moveToSol :: BufferM ()
@@ -286,11 +305,18 @@ prevNParagraphs n = replicateM_ n $ moveB unitEmacsParagraph Backward
 -- @goUnmatchedB Forward '{' '}'@
 -- Move to the next unmatched '}'
 goUnmatchedB :: Direction -> Char -> Char -> BufferM ()
-goUnmatchedB dir cStart' cStop' = stepB >> readB >>= go (0::Int)
-  where go opened c | c == cStop && opened == 0 = return ()
-                    | c == cStop                = stepB >> readB >>= go (opened-1)
-                    | c == cStart               = stepB >> readB >>= go (opened+1)
-                    | otherwise                 = stepB >> readB >>= go opened
+goUnmatchedB dir cStart' cStop' = getLineAndCol >>= \position ->
+    stepB >> readB >>= go position (0::Int)
+    where
+        go pos opened c
+           | c == cStop && opened == 0 = return ()
+           | c == cStop       = goIfNotEofSof pos (opened-1)
+           | c == cStart      = goIfNotEofSof pos (opened+1)
+           | otherwise        = goIfNotEofSof pos  opened
+        goIfNotEofSof pos opened = atEof >>= \eof -> atSof >>= \sof ->
+            if not eof && not sof
+                then stepB >> readB >>= go pos opened
+                else gotoLn (fst pos) >> moveToColB (snd pos)
         (stepB, cStart, cStop) | dir == Forward = (rightB, cStart', cStop')
                                | otherwise      = (leftB, cStop', cStart')
 
@@ -330,19 +356,12 @@ getLineAndColOfPoint p = savingPointB $ moveTo p >> getLineAndCol
 readLnB :: BufferM YiString
 readLnB = readUnitB Line
 
-readCharB :: BufferM (Maybe Char)
-readCharB = fmap R.head (readUnitB Character)
-
--- | Read from point to end of line
-readRestOfLnB :: BufferM YiString
-readRestOfLnB = readRegionB =<< regionOfPartB Line Forward
-
 -- | Read from point to beginning of line
 readPreviousOfLnB :: BufferM YiString
 readPreviousOfLnB = readRegionB =<< regionOfPartB Line Backward
 
 hasWhiteSpaceBefore :: BufferM Bool
-hasWhiteSpaceBefore = liftM isSpace (prevPointB >>= readAtB)
+hasWhiteSpaceBefore = fmap isSpace (prevPointB >>= readAtB)
 
 -- | Get the previous point, unless at the beginning of the file
 prevPointB :: BufferM Point
@@ -351,14 +370,6 @@ prevPointB = do
   if sof then pointB
          else do p <- pointB
                  return $ Point (fromPoint p - 1)
-
--- | Get the next point, unless at the end of the file
-nextPointB :: BufferM Point
-nextPointB = do
-  eof <- atEof
-  if eof then pointB
-         else do p <- pointB
-                 return $ Point (fromPoint p + 1)
 
 -- | Reads in word at point.
 readCurrentWordB :: BufferM YiString
@@ -398,20 +409,23 @@ deleteHorizontalSpaceB u = do
   c <- curCol
   reg <- regionOfB Line
   text <- readRegionB reg
-  let r = deleteSpaces c text
+  let (r, jb) = deleteSpaces c text
   modifyRegionB (const r) reg
-  -- If we only deleted before point, move back that many characters
-  -- too or it feels weird.
-  case u of
-    Just _ -> moveToColB (c - (R.length text - R.length r))
-    Nothing -> return ()
+  -- Jump backwards to where the now-deleted spaces have started so
+  -- it's consistent and feels natural instead of leaving us somewhere
+  -- in the text.
+  moveToColB $ c - jb
   where
-    deleteSpaces :: Int -> R.YiString -> R.YiString
+    deleteSpaces :: Int -> R.YiString -> (R.YiString, Int)
     deleteSpaces c l =
       let (f, b) = R.splitAt c l
-      in R.dropWhileEnd isSpace f <> case u of
-        Nothing -> R.dropWhile isSpace b
-        Just _ -> b
+          f' = R.dropWhileEnd isSpace f
+          cleaned = f' <> case u of
+            Nothing -> R.dropWhile isSpace b
+            Just _ -> b
+      -- We only want to jump back the number of spaces before the
+      -- point, not the total number of characters we're removing.
+      in (cleaned, R.length f - R.length f')
 
 ----------------------------------------
 -- Transform operations
@@ -428,25 +442,12 @@ lowercaseWordB = transformB (R.withText T.toLower) unitWord Forward
 capitaliseWordB :: BufferM ()
 capitaliseWordB = transformB capitalizeFirst unitWord Forward
 
--- | switch the case of the letter under the cursor
-switchCaseCharB :: BufferM ()
-switchCaseCharB =
-  transformB (R.withText $ T.map switchCaseChar) Character Forward
-
 switchCaseChar :: Char -> Char
 switchCaseChar c = if isUpper c then toLower c else toUpper c
 
 -- | Delete to the end of line, excluding it.
 deleteToEol :: BufferM ()
 deleteToEol = deleteRegionB =<< regionOfPartB Line Forward
-
--- | Delete whole line moving to the next line
-deleteLineForward :: BufferM ()
-deleteLineForward =
-  do moveToSol   -- Move to the start of the line
-     deleteToEol -- Delete the rest of the line not including the newline char
-     deleteN 1   -- Delete the newline character
-
 
 -- | Transpose two characters, (the Emacs C-t action)
 swapB :: BufferM ()
@@ -549,15 +550,8 @@ downScreenB = scrollScreensB 1
 -- | Scroll by n screens (negative for up)
 scrollScreensB :: Int -> BufferM ()
 scrollScreensB n = do
-    h <- askWindow height
-    scrollB $ n * max 0 (h - 3) -- subtract some amount to get some overlap (emacs-like).
-
--- | Scroll according to function passed. The function takes the
--- | Window height in lines, its result is passed to scrollB
--- | (negative for up)
-scrollByB :: (Int -> Int) -> Int -> BufferM ()
-scrollByB f n = do h <- askWindow height
-                   scrollB $ n * f h
+    h <- askWindow actualLines
+    scrollB $ n * max 0 (h - 1) -- subtract some amount to get some overlap (emacs-like).
 
 -- | Same as scrollB, but also moves the cursor
 vimScrollB :: Int -> BufferM ()
@@ -566,14 +560,14 @@ vimScrollB n = do scrollB n
 
 -- | Same as scrollByB, but also moves the cursor
 vimScrollByB :: (Int -> Int) -> Int -> BufferM ()
-vimScrollByB f n = do h <- askWindow height
+vimScrollByB f n = do h <- askWindow actualLines
                       vimScrollB $ n * f h
 
 -- | Move to middle line in screen
 scrollToCursorB :: BufferM ()
 scrollToCursorB = do
     MarkSet f i _ <- markLines
-    h <- askWindow height
+    h <- askWindow actualLines
     let m = f + (h `div` 2)
     scrollB $ i - m
 
@@ -684,7 +678,7 @@ middleB = do
   w <- ask
   f <- fromMark <$> askMarks
   moveTo =<< use (markPointA f)
-  replicateM_ (height w `div` 2) lineDown
+  replicateM_ (actualLines w `div` 2) lineDown
 
 pointInWindowB :: Point -> BufferM Bool
 pointInWindowB p = nearRegion p <$> winRegionB
@@ -721,10 +715,6 @@ setSelectRegionB region = do
   assign highlightSelectionA True
   setSelectionMarkPointB $ regionStart region
   moveTo $ regionEnd region
-
--- | Extend the selection mark using the given region.
-extendSelectRegionB :: Region -> BufferM ()
-extendSelectRegionB region = (setSelectRegionB . unionRegion region) =<< getSelectRegionB
 
 ------------------------------------------
 -- Some line related movements/operations
@@ -778,13 +768,6 @@ getNextNonBlankLineB dir =
 -- Some more utility functions involving
 -- regions (generally that which is selected)
 
--- | Uses a string modifying function to modify the current selection
--- Currently unsets the mark such that we have no selection, arguably
--- we could instead work out where the new positions should be
--- and move the mark and point accordingly.
-modifySelectionB :: (R.YiString -> R.YiString) -> BufferM ()
-modifySelectionB = modifyExtendedSelectionB Character
-
 modifyExtendedSelectionB :: TextUnit -> (R.YiString -> R.YiString) -> BufferM ()
 modifyExtendedSelectionB unit transform
     = modifyRegionB transform =<< unitWiseRegion unit =<< getSelectRegionB
@@ -827,34 +810,6 @@ toggleCommentSelectionB insPrefix delPrefix = do
   if delPrefix == R.take (R.length delPrefix) l
     then unLineCommentSelectionB insPrefix delPrefix
     else linePrefixSelectionB insPrefix
-
--- | Justifies all the lines of the selection to be the same as
--- the top line.
--- NOTE: if the selection begins part way along a line, the other
--- lines will be justified only with respect to the part of the indentation
--- which is selected.
-justifySelectionWithTopB :: BufferM ()
-justifySelectionWithTopB =
-  modifySelectionB justifyLines
-  where
-
-  justifyLines :: R.YiString -> R.YiString
-  justifyLines input =
-    case R.lines input of
-      []           -> ""
-      [ one ]      -> one
-      (top : _)    -> mapLines justifyLine input
-        where
-          -- The indentation of the top line.
-          topIndent = R.takeWhile isSpace top
-
-          -- Justify a single line by removing its current indentation
-          -- and replacing it with that of the top line. Note that
-          -- this will work even if the indentation contains tab
-          -- characters.
-          justifyLine :: R.YiString -> R.YiString
-          justifyLine "" = ""
-          justifyLine l  = topIndent <> R.dropWhile isSpace l
 
 -- | Replace the contents of the buffer with some string
 replaceBufferContent :: YiString -> BufferM ()
@@ -972,11 +927,9 @@ rightEdgesOfRegionB Block reg = savingPointB $ do
     (l0, _) <- getLineAndColOfPoint $ regionStart reg
     (l1, _) <- getLineAndColOfPoint $ regionEnd reg
     moveTo $ 1 + regionEnd reg
-    fmap (reverse . catMaybes) $ forM [0 .. abs (l0 - l1)] $ \i -> savingPointB $ do
+    fmap reverse $ forM [0 .. abs (l0 - l1)] $ \i -> savingPointB $ do
         void $ lineMoveRel $ -i
-        p <- pointB
-        eol <- atEol
-        return (if not eol then Just p else Nothing)
+        pointB
 rightEdgesOfRegionB LineWise reg = savingPointB $ do
     lastEol <- do
         moveTo $ regionEnd reg
@@ -1215,3 +1168,23 @@ lineMoveVisRelDown n | n < 0 = lineMoveVisRelUp $ negate n
                 void $ gotoLnFrom $ -1
                 moveToEol
                 lineMoveVisRelDown $ next - 1
+
+-- | Implements the same logic that emacs' `mark-word` does.
+-- Checks the mark point and moves it forth (or backward) for one word.
+markWord :: BufferM ()
+markWord = do
+    curPos <- pointB
+    curMark <- getSelectionMarkPointB
+    isVisible <- getVisibleSelection
+
+    savingPointB $ do
+        if not isVisible
+        then nextWordB
+        else do
+            moveTo curMark
+            if curMark < curPos
+            then prevWordB
+            else nextWordB
+
+        setVisibleSelection True
+        pointB >>= setSelectionMarkPointB

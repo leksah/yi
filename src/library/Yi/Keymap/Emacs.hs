@@ -1,8 +1,8 @@
-{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleContexts  #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE UnicodeSyntax #-}
+{-# LANGUAGE TemplateHaskell   #-}
+{-# LANGUAGE TypeOperators     #-}
+{-# LANGUAGE LambdaCase        #-}
 {-# OPTIONS_HADDOCK show-extensions #-}
 
 -- |
@@ -26,35 +26,30 @@ module Yi.Keymap.Emacs ( keymap
                        , completionCaseSensitive
                        ) where
 
-import Control.Applicative
-import Control.Lens
-import Control.Monad
-import Data.Char
-import Data.Maybe
-import Data.Prototype
-import Data.Text ()
+import Control.Applicative      (Alternative ((<|>), empty, some))
+import Control.Lens             (assign, makeLenses, (%=))
+import Control.Monad            (replicateM_, unless, void)
+import Control.Monad.State      (gets)
+import Data.Char                (digitToInt, isDigit)
+import Data.Maybe               (fromMaybe)
+import Data.Prototype           (Proto (Proto), extractValue)
+import Data.Text                ()
 import Yi.Buffer
-import Yi.Command (shellCommandE)
-import Yi.Core (closeWindowEmacs, runAction, suspendEditor,
-                userForceRefresh, withSyntax)
-import Yi.Dired
+import Yi.Command               (shellCommandE)
+import Yi.Core
+import Yi.Dired                 (dired)
 import Yi.Editor
-import Yi.File
-import Yi.Keymap
+import Yi.File                  (fwriteE, fwriteToE)
+import Yi.Keymap                (Keymap, KeymapSet, YiAction (..), YiM, modelessKeymapSet, write)
 import Yi.Keymap.Emacs.KillRing
 import Yi.Keymap.Emacs.Utils
-  (askQuitEditor, evalRegionE, executeExtendedCommandE, findFile,
-   findFileNewTab, promptFile, insertNextC, isearchKeymap, killBufferE,
-   queryReplaceE, readUniversalArg, scrollDownE, scrollUpE, switchBufferE,
-   askSaveEditor, argToInt, promptTag, justOneSep, joinLinesE, countWordsRegion,
-   findFileReadOnly)
 import Yi.Keymap.Keys
 import Yi.MiniBuffer
-import Yi.Misc (adjBlock, adjIndent, selectAll, placeMark)
-import Yi.Mode.Buffers ( listBuffers )
+import Yi.Misc                  (adjBlock, adjIndent, placeMark, selectAll)
+import Yi.Mode.Buffers          (listBuffers)
 import Yi.Rectangle
-import Yi.Search (isearchFinishWithE, resetRegexE)
-import Yi.TextCompletion
+import Yi.Search                (isearchFinishWithE, resetRegexE, getRegexE)
+import Yi.TextCompletion        (resetComplete, wordComplete')
 
 data ModeMap = ModeMap { _eKeymap :: Keymap
                        , _completionCaseSensitive :: Bool
@@ -98,8 +93,13 @@ deleteB' = adjBlock (-1) >> deleteN 1
 
 -- | Wrapper around 'moveE' which also cancels incremental search. See
 -- issue #499 for details.
-moveE ∷ TextUnit → Direction → EditorM ()
-moveE u d = isearchFinishWithE resetRegexE >> withCurrentBuffer (moveB u d)
+moveE :: TextUnit -> Direction -> EditorM ()
+moveE u d = do
+  getRegexE >>= \case
+    -- let's check whether searching is in progress (issues #738, #610)
+    Nothing -> return ()
+    _ -> isearchFinishWithE resetRegexE
+  withCurrentBuffer (moveB u d)
 
 emacsKeys :: Maybe Int -> Keymap
 emacsKeys univArg =
@@ -107,14 +107,12 @@ emacsKeys univArg =
            spec KTab            ?>>! adjIndent IncreaseCycle
          , shift (spec KTab)    ?>>! adjIndent DecreaseCycle
          , spec KEnter          ?>>! repeatingArg newlineB
-         , spec KDel            ?>>! repeatingArg (blockKillring >> deleteB')
-         , spec KBS             ?>>! repeatingArg (blockKillring >>
-                                                    adjBlock (-1) >>
-                                                    bdeleteB)
+         , spec KDel            ?>>! deleteRegionOr deleteForward
+         , spec KBS             ?>>! deleteRegionOr deleteBack
          , spec KHome           ?>>! repeatingArg moveToSol
          , spec KEnd            ?>>! repeatingArg moveToEol
-         , spec KLeft           ?>>! repeatingArg leftB
-         , spec KRight          ?>>! repeatingArg rightB
+         , spec KLeft           ?>>! repeatingArg $ moveE Character Backward
+         , spec KRight          ?>>! repeatingArg $ moveE Character Forward
          , spec KUp             ?>>! repeatingArg $ moveE VLine Backward
          , spec KDown           ?>>! repeatingArg $ moveE VLine Forward
          , spec KPageDown       ?>>! repeatingArg downScreenB
@@ -137,10 +135,10 @@ emacsKeys univArg =
          , ctrlCh '/'           ?>>! repeatingArg undoB
          , ctrlCh '_'           ?>>! repeatingArg undoB
          , ctrlCh 'a'           ?>>! repeatingArg (maybeMoveB Line Backward)
-         , ctrlCh 'b'           ?>>! repeatingArg leftB
-         , ctrlCh 'd'           ?>>! repeatingArg (blockKillring >> deleteB')
+         , ctrlCh 'b'           ?>>! repeatingArg $ moveE Character Backward
+         , ctrlCh 'd'           ?>>! deleteForward
          , ctrlCh 'e'           ?>>! repeatingArg (maybeMoveB Line Forward)
-         , ctrlCh 'f'           ?>>! repeatingArg rightB
+         , ctrlCh 'f'           ?>>! repeatingArg $ moveE Character Forward
          , ctrlCh 'g'           ?>>! setVisibleSelection False
          , ctrlCh 'h'           ?>> char 'b' ?>>! acceptedInputsOtherWindow
          , ctrlCh 'i'           ?>>! adjIndent IncreaseOnly
@@ -203,6 +201,7 @@ emacsKeys univArg =
          , metaCh 'l'           ?>>! repeatingArg lowercaseWordB
          , metaCh 'm'           ?>>! firstNonSpaceB
          , metaCh 'q'           ?>>! withSyntax modePrettify
+         , metaCh 'r'           ?>>! repeatingArg moveToMTB
          , metaCh 'u'           ?>>! repeatingArg uppercaseWordB
          , metaCh 't'           ?>>! repeatingArg (transposeB unitWord Forward)
          , metaCh 'w'           ?>>! killRingSaveE
@@ -213,6 +212,7 @@ emacsKeys univArg =
          , metaCh '}'           ?>>! repeatingArg (nextNParagraphs 1)
          , metaCh '='           ?>>! countWordsRegion
          , metaCh '\\'          ?>>! deleteHorizontalSpaceB univArg
+         , metaCh '@'           ?>>! repeatingArg markWord
 
          -- Other meta key-bindings
          , meta (spec KBS)      ?>>! repeatingArg bkillWordB
@@ -234,6 +234,21 @@ emacsKeys univArg =
   withIntArg :: YiAction (m ()) () => (Int -> m ()) -> YiM ()
   withIntArg cmd = withUnivArg $ \arg -> cmd (fromMaybe 1 arg)
 
+  deleteBack :: YiM ()
+  deleteBack = repeatingArg $ blockKillring >> adjBlock (-1) >> bdeleteB
+
+  deleteForward :: YiM ()
+  deleteForward = repeatingArg $ blockKillring >> deleteB'
+
+  -- Deletes current region if any, otherwise executes the given
+  -- action.
+  deleteRegionOr :: (Show a, YiAction (m a) a) => m a -> YiM ()
+  deleteRegionOr f = do
+    b <- gets currentBuffer
+    r <- withGivenBuffer b getSelectRegionB
+    if regionSize r == 0
+      then runAction $ makeAction f
+      else withGivenBuffer b $ deleteRegionB r
 
   ctrlC = choice [ ctrlCh 'c' ?>>! commentRegion ]
 

@@ -1,6 +1,7 @@
+{-# LANGUAGE BangPatterns      #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE ViewPatterns      #-}
 
 module Yi.UI.SimpleLayout
     ( Rect (..)
@@ -12,25 +13,23 @@ module Yi.UI.SimpleLayout
     , verticalOffsetsForWindows
     ) where
 
-import Prelude hiding (concatMap, mapM)
+import           Prelude                        hiding (concatMap, mapM)
 
-import Control.Lens
-import Control.Monad.State (evalState, get, put)
-import Data.Foldable
-import Data.List (partition)
-import Data.Maybe (fromJust)
-import qualified Data.List.PointedList.Circular as PL
-import qualified Data.Map.Strict as M
-import Data.Monoid
-import qualified Data.Text as T
-import Data.Traversable (mapM)
-
-
-import Yi.Buffer
-import Yi.Editor
-import qualified Yi.Rope as R
-import Yi.UI.Utils
-import Yi.Window
+import           Control.Lens                   (use, (.~))
+import           Control.Monad.State            (evalState, get, put)
+import           Data.Foldable                  (find, toList)
+import           Data.List                      (partition)
+import qualified Data.List.PointedList.Circular as PL (PointedList)
+import qualified Data.Map.Strict                as M (Map, fromList)
+import           Data.Maybe                     (fromJust)
+import           Data.Monoid                    ((<>))
+import qualified Data.Text                      as T (uncons)
+import           Data.Traversable               (mapM)
+import           Yi.Buffer
+import           Yi.Editor
+import qualified Yi.Rope                        as R (take, toString, toText)
+import           Yi.UI.Utils                    (arrangeItems)
+import           Yi.Window
 
 data Layout = Layout
     { tabbarRect :: !Rect
@@ -155,7 +154,7 @@ lastVisiblePointAndWrapCountB (Size2D w h) (Point topLeft) = savingPointB $ do
     ts <- fmap tabSize indentSettingsB
     text <- fmap (R.toText . R.take (w * h))
                  (streamB Forward (Point topLeft))
-    let go !x !y !wc !n t | x >= w = go (x - w) (y + 1) (wc + 1) n t
+    let go !x !y !wc !n t | x > w = go (x - w) (y + 1) (wc + 1) n t
         go _  !y !wc !n _ | y >= h = (Point (n - 1), wc)
         go !x !y !wc !n (T.uncons -> Just (c, t)) =
             case c of

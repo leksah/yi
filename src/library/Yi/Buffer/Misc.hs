@@ -1,17 +1,18 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE DeriveFoldable #-}
-{-# LANGUAGE DeriveFunctor #-}
-{-# LANGUAGE DeriveTraversable #-}
-{-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE CPP                        #-}
+{-# LANGUAGE DeriveDataTypeable         #-}
+{-# LANGUAGE DeriveFoldable             #-}
+{-# LANGUAGE DeriveFunctor              #-}
+{-# LANGUAGE DeriveTraversable          #-}
+{-# LANGUAGE ExistentialQuantification  #-}
+{-# LANGUAGE FlexibleContexts           #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE ImpredicativeTypes #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE TemplateHaskell #-}
-{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE ImpredicativeTypes         #-}
+{-# LANGUAGE LambdaCase                 #-}
+{-# LANGUAGE OverloadedStrings          #-}
+{-# LANGUAGE ScopedTypeVariables        #-}
+{-# LANGUAGE StandaloneDeriving         #-}
+{-# LANGUAGE TemplateHaskell            #-}
+{-# LANGUAGE TupleSections              #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# OPTIONS_HADDOCK show-extensions #-}
 
@@ -34,6 +35,9 @@ module Yi.Buffer.Misc
   , runBuffer
   , runBufferFull
   , runBufferDummyWindow
+  , screenTopLn
+  , screenMidLn
+  , screenBotLn
   , curLn
   , curCol
   , colOf
@@ -52,8 +56,9 @@ module Yi.Buffer.Misc
   , lineUp
   , lineDown
   , newB
-  , MarkValue(..)
-  , Overlay, OvlLayer(..)
+  , MarkValue (..)
+  , Overlay
+      (overlayAnnotation, overlayBegin, overlayEnd, overlayOwner, overlayStyle)
   , mkOverlay
   , gotoLn
   , gotoLnFrom
@@ -85,6 +90,7 @@ module Yi.Buffer.Misc
   , modifyMarkB
   , newMarkB
   , deleteMarkB
+  , getVisibleSelection
   , setVisibleSelection
   , isUnchangedBuffer
   , setAnyMode
@@ -103,9 +109,12 @@ module Yi.Buffer.Misc
   , movingToPrefVisCol
   , preferColA
   , markSavedB
+  , retroactivelyAtSavePointB
   , addOverlayB
   , delOverlayB
-  , delOverlayLayerB
+  , delOverlaysOfOwnerB
+  , getOverlaysOfOwnerB
+  , isPointInsideOverlay
   , savingExcursionB
   , savingPointB
   , savingPositionB
@@ -132,6 +141,7 @@ module Yi.Buffer.Misc
   , modeToggleCommentSelectionA
   , modeGetStrokesA
   , modeOnLoadA
+  , modeGotoDeclarationA
   , modeModeLineA
   , AnyMode (..)
   , IndentBehaviour (..)
@@ -162,7 +172,7 @@ module Yi.Buffer.Misc
   , miniIdentString
   , identA
   , directoryContentA
-  , BufferId(..)
+  , BufferId (..)
   , file
   , lastSyncTimeA
   , replaceCharB
@@ -182,39 +192,47 @@ module Yi.Buffer.Misc
   , indentSettingsB
   , fontsizeVariationA
   , encodingConverterNameA
+  , stickyEolA
   ) where
 
-import           Control.Applicative
-import           Control.Lens hiding ((+~), Action, reversed, at, act)
-import           Control.Monad.RWS.Strict hiding (mapM_, mapM, get, put,
-                                                  forM_, forM)
-import           Data.Binary
-import           Data.Char(ord)
-import           Data.Default
-import           Data.Foldable
-import           Data.Function hiding ((.), id)
-import qualified Data.Map as M
-import           Data.Maybe
-import qualified Data.Text as T
-import qualified Data.Text.Encoding as E
-import           Data.Time
-import           Data.Traversable
-import           Data.DynamicState.Serializable
-import           Numeric(showHex)
-import           Prelude hiding (foldr, mapM, notElem)
-import           System.FilePath
-import           Yi.Buffer.Basic
+import           Prelude                        hiding (foldr, mapM, notElem)
+
+import           Control.Applicative            (Applicative ((*>), (<*>), pure), (<$>))
+import           Control.Lens                   (Lens', assign, lens, use, uses, view, (%=), (%~), (.=), (^.))
+import           Control.Monad.RWS.Strict       (Endo (Endo, appEndo),
+                                                 MonadReader (ask), MonadState,
+                                                 MonadWriter (tell),
+                                                 Monoid (mconcat, mempty), asks,
+                                                 gets, join, modify,
+                                                 replicateM_, runRWS, void,
+                                                 when, (<>))
+import           Data.Binary                    (Binary (..), Get)
+import           Data.Char                      (ord)
+import           Data.Default                   (Default (def))
+import           Data.DynamicState.Serializable (getDyn, putDyn)
+import           Data.Foldable                  (Foldable (foldr), forM_, notElem)
+import qualified Data.Map                       as M (Map, empty, insert, lookup)
+import           Data.Maybe                     (fromMaybe, isNothing)
+import qualified Data.Set                       as Set (Set)
+import qualified Data.Text                      as T (Text, concat, justifyRight, pack, snoc, unpack)
+import qualified Data.Text.Encoding             as E (decodeUtf8, encodeUtf8)
+import           Data.Time                      (UTCTime (UTCTime))
+import           Data.Traversable               (Traversable (mapM), forM)
+import           Numeric                        (showHex)
+import           System.FilePath                (joinPath, splitPath)
+import           Yi.Buffer.Basic                (BufferRef, Point (..), Size (Size), WindowRef)
 import           Yi.Buffer.Implementation
 import           Yi.Buffer.Undo
-import           Yi.Interact as I
-import           Yi.Monad
-import           Yi.Region
-import           Yi.Rope (YiString)
-import qualified Yi.Rope as R
-import           Yi.Syntax
+import           Yi.Interact                    as I (P (End))
+import           Yi.Monad                       (getsAndModify)
+import           Yi.Region                      (Region, mkRegion)
+import           Yi.Rope                        (YiString)
+import qualified Yi.Rope                        as R
+import           Yi.Syntax                      (ExtHL (ExtHL), Stroke, noHighlighter)
 import           Yi.Types
-import           Yi.Utils
-import           Yi.Window
+import           Yi.Utils                       (SemiNum ((+~)), makeClassyWithSuffix, makeLensesWithSuffix)
+import           Yi.Window                      (Window (width, wkey, actualLines), dummyWindow)
+
 
 -- In addition to Buffer's text, this manages (among others):
 --  * Log of updates mades
@@ -385,15 +403,23 @@ addOverlayB ov = do
   pendingUpdatesA %= (++ [overlayUpdate ov])
   modifyBuffer $ addOverlayBI ov
 
+getOverlaysOfOwnerB :: R.YiString -> BufferM (Set.Set Overlay)
+getOverlaysOfOwnerB owner = queryBuffer (getOverlaysOfOwnerBI owner)
+
 -- | Remove an existing "overlay"
 delOverlayB :: Overlay -> BufferM ()
 delOverlayB ov = do
   pendingUpdatesA %= (++ [overlayUpdate ov])
   modifyBuffer $ delOverlayBI ov
 
-delOverlayLayerB :: OvlLayer -> BufferM ()
-delOverlayLayerB l =
-  modifyBuffer $ delOverlayLayer l
+delOverlaysOfOwnerB :: R.YiString -> BufferM ()
+delOverlaysOfOwnerB owner =
+  modifyBuffer $ delOverlaysOfOwnerBI owner
+
+isPointInsideOverlay :: Point -> Overlay -> Bool
+isPointInsideOverlay point overlay =
+    let Overlay _ (MarkValue start _) (MarkValue finish _) _ _ = overlay
+    in start <= point && point <= finish
 
 -- | Execute a @BufferM@ value on a given buffer and window.  The new state of
 -- the buffer is returned alongside the result of the computation.
@@ -486,25 +512,36 @@ undoRedo :: (forall syntax. Mark -> URList -> BufferImpl syntax
              -> (BufferImpl syntax, (URList, [Update])))
          -> BufferM ()
 undoRedo f = do
-  m <- getInsMark
-  ur <- use undosA
-  (ur', updates) <- queryAndModify (f m ur)
-  assign undosA ur'
-  tell updates
+  isTransacPresent <- use updateTransactionInFlightA
+  if isTransacPresent
+  then error "Can't undo while undo transaction is in progress"
+  else do
+      m <- getInsMark
+      ur <- use undosA
+      (ur', updates) <- queryAndModify (f m ur)
+      assign undosA ur'
+      tell updates
 
 undoB :: BufferM ()
-undoB = do
-    isTransacPresent <- use updateTransactionInFlightA
-    if isTransacPresent
-    then error "Can't undo while undo transaction is in progress"
-    else undoRedo undoU
+undoB = undoRedo undoU
 
 redoB :: BufferM ()
-redoB = do
-    isTransacPresent <- use updateTransactionInFlightA
-    if isTransacPresent
-    then error "Can't undo while undo transaction is in progress"
-    else undoRedo redoU
+redoB = undoRedo redoU
+
+-- | Undo all updates that happened since last save,
+-- perform a given action and redo all updates again.
+-- Given action must not modify undo history.
+retroactivelyAtSavePointB :: BufferM a -> BufferM a
+retroactivelyAtSavePointB action = do
+    (undoDepth, result) <- go 0
+    replicateM_ undoDepth redoB
+    return result
+    where
+        go step = do
+            atSavedPoint <- gets isUnchangedBuffer
+            if atSavedPoint
+            then (step,) <$> action
+            else undoB >> go (step + 1)
 
 
 -- | Analogous to const, but returns a function that takes two parameters,
@@ -554,6 +591,7 @@ newB unique nm s =
             , undos  = emptyU
             , preferCol = Nothing
             , preferVisCol = Nothing
+            , stickyEol = False
             , bufferDynamic = mempty
             , pendingUpdates = []
             , selectionStyle = SelectionStyle False False
@@ -703,6 +741,29 @@ curLn = do
     p <- pointB
     queryBuffer (lineAt p)
 
+
+-- | Top line of the screen
+screenTopLn :: BufferM Int
+screenTopLn = do
+    p <- use . markPointA =<< fromMark <$> askMarks
+    queryBuffer (lineAt p)
+
+
+-- | Middle line of the screen
+screenMidLn :: BufferM Int
+screenMidLn = (+) <$> screenTopLn <*> (div <$> screenLines <*> pure 2)
+
+
+-- | Bottom line of the screen
+screenBotLn :: BufferM Int
+screenBotLn = (+) <$> screenTopLn <*> screenLines
+
+
+-- | Amount of lines in the screen
+screenLines :: BufferM Int
+screenLines = pred <$> askWindow actualLines
+
+
 -- | Return line numbers of marks
 markLines :: BufferM (MarkSet Int)
 markLines = mapM getLn =<< askMarks
@@ -799,6 +860,10 @@ setNamedMarkHereB name = do
 -- | Highlight the selection
 setVisibleSelection :: Bool -> BufferM ()
 setVisibleSelection = assign highlightSelectionA
+
+-- | Whether the selection is highlighted
+getVisibleSelection :: BufferM Bool
+getVisibleSelection = use highlightSelectionA
 
 getInsMark :: BufferM Mark
 getInsMark = insMark <$> askMarks

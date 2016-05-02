@@ -1,7 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 import           Data.Monoid
-import qualified Data.Text as T
 import           Yi hiding (super)
 import qualified Yi.Keymap.Vim as V2
 import qualified Yi.Keymap.Vim.Common as V2
@@ -15,11 +14,6 @@ main = yi $ defaultVimConfig {
     defaultKm = myKeymapSet,
     configCheckExternalChangesObsessively = False
 }
-
-defaultSearchKeymap :: Keymap
-defaultSearchKeymap = do
-    Event (KASCII c) [] <- anyEvent
-    write (isearchAddE $ T.singleton c)
 
 myKeymapSet :: KeymapSet
 myKeymapSet = V2.mkKeymapSet $ V2.defVimConfig `override` \super this ->
@@ -45,7 +39,6 @@ myBindings eval =
                                              (evs `V2.matchesString` x)
                                     _ -> V2.NoMatch)
     in [ nmap "<C-h>" previousTabE
-       , nmap "<C-l>" nextTabE
        , nmap "<C-l>" nextTabE
 
          -- Press space to clear incremental search highlight

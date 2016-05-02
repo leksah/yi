@@ -1,6 +1,6 @@
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TemplateHaskell   #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# OPTIONS_HADDOCK show-extensions #-}
 
@@ -14,7 +14,7 @@
 -- The top level editor state, and operations on it. This is inside an
 -- internal module for easy re-export with Yi.Types bits.
 
-module Yi.Editor ( Editor(..), EditorM(..), MonadEditor(..)
+module Yi.Editor ( Editor(..), EditorM, MonadEditor(..)
                  , runEditor
                  , acceptedInputsOtherWindow
                  , addJumpAtE
@@ -51,6 +51,7 @@ module Yi.Editor ( Editor(..), EditorM(..), MonadEditor(..)
                  , layoutManagerPreviousVariantE
                  , layoutManagersNextE
                  , layoutManagersPreviousE
+                 , maxStatusHeightA
                  , moveTabE
                  , moveWinNextE
                  , moveWinPrevE
@@ -61,6 +62,7 @@ module Yi.Editor ( Editor(..), EditorM(..), MonadEditor(..)
                  , newWindowE
                  , nextTabE
                  , nextWinE
+                 , onCloseActionsA
                  , pendingEventsA
                  , prevWinE
                  , previousTabE
@@ -95,42 +97,52 @@ module Yi.Editor ( Editor(..), EditorM(..), MonadEditor(..)
                  , withWindowE
                  ) where
 
-import           Control.Applicative
-import           Control.Lens
-import           Control.Monad
-import           Control.Monad.Reader hiding (mapM, forM_ )
-import           Control.Monad.State hiding (get, put, mapM, forM_)
-import           Data.Binary
-import           Data.Default
-import qualified Data.DelayList as DelayList
-import           Data.DynamicState.Serializable
-import           Data.Foldable hiding (forM_)
-import           Data.List (delete, (\\))
-import           Data.List.NonEmpty (fromList, NonEmpty(..), nub)
-import qualified Data.List.NonEmpty as NE
-import qualified Data.List.PointedList as PL (atEnd, moveTo)
-import qualified Data.List.PointedList.Circular as PL
-import qualified Data.Map as M
-import           Data.Maybe
-import qualified Data.Monoid as Mon
-import           Data.Semigroup
-import qualified Data.Text as T
-import           Prelude hiding (foldl,concatMap,foldr,all)
-import           System.FilePath (splitPath)
+import           Prelude                        hiding (all, concatMap, foldl, foldr)
+
+import           Control.Applicative            ((<$>), (<*>))
+import           Control.Lens                   (Lens', assign, lens, mapped,
+                                                 use, uses, view, (%=), (%~),
+                                                 (&), (.~), (^.))
+import           Control.Monad                  (forM_, liftM)
+import           Control.Monad.Reader           (MonadReader (ask), asks,
+                                                 unless, when)
+import           Control.Monad.State            (gets, modify)
+import           Data.Binary                    (Binary, get, put)
+import           Data.Default                   (Default, def)
+import qualified Data.DelayList                 as DelayList (insert)
+import           Data.DynamicState.Serializable (getDyn, putDyn)
+import           Data.Foldable                  (Foldable (foldl, foldr), all, concatMap, toList)
+import           Data.List                      (delete, (\\))
+import           Data.List.NonEmpty             (NonEmpty (..), fromList, nub)
+import qualified Data.List.NonEmpty             as NE (filter, head, length, toList, (<|))
+import qualified Data.List.PointedList          as PL (atEnd, moveTo)
+import qualified Data.List.PointedList.Circular as PL (PointedList (..), delete,
+                                                       deleteLeft, deleteOthers,
+                                                       deleteRight, focus,
+                                                       insertLeft, insertRight,
+                                                       length, next, previous,
+                                                       singleton, _focus)
+import qualified Data.Map                       as M (delete, elems, empty,
+                                                      insert, lookup, singleton, (!))
+import           Data.Maybe                     (fromJust, fromMaybe, isNothing)
+import qualified Data.Monoid                    as Mon ((<>))
+import           Data.Semigroup                 (mempty, (<>))
+import qualified Data.Text                      as T (Text, null, pack, unlines, unpack, unwords)
+import           System.FilePath                (splitPath)
 import           Yi.Buffer
 import           Yi.Config
-import           Yi.Interact as I
-import           Yi.JumpList
-import           Yi.KillRing
+import           Yi.Interact                    as I (accepted, mkAutomaton)
+import           Yi.JumpList                    (Jump (..), JumpList, addJump, jumpBack, jumpForward)
+import           Yi.KillRing                    (krEmpty, krGet, krPut, krSet)
 import           Yi.Layout
-import           Yi.Monad
-import           Yi.Rope (YiString, fromText, empty)
-import qualified Yi.Rope as R
-import           Yi.String
-import           Yi.Style (defaultStyle)
+import           Yi.Monad                       (getsAndModify)
+import           Yi.Rope                        (YiString, empty, fromText)
+import qualified Yi.Rope                        as R (YiString, fromText, snoc)
+import           Yi.String                      (listify)
+import           Yi.Style                       (defaultStyle)
 import           Yi.Tab
 import           Yi.Types
-import           Yi.Utils hiding ((+~))
+import           Yi.Utils
 import           Yi.Window
 
 instance Binary Editor where
@@ -333,13 +345,6 @@ getBufferWithName bufName = withEditor $ do
     [] -> fail ("Buffer not found: " ++ T.unpack bufName)
     b:_ -> return b
 
--- | Make all buffers visible by splitting the current window list.
--- FIXME: rename to displayAllBuffersE; make sure buffers are not open twice.
-openAllBuffersE :: EditorM ()
-openAllBuffersE = do
-  bs <- gets bufferSet
-  forM_ bs $ ((%=) windowsA . PL.insertRight =<<) . newWindowE False . bkey
-
 ------------------------------------------------------------------------
 -- | Perform action with any given buffer, using the last window that
 -- was used for that buffer.
@@ -497,10 +502,6 @@ switchToBufferE bk = windowsA . PL.focus %= \w ->
   w & bufkeyA .~ bk
     & bufAccessListA %~ forceFold1 . (bufkey w:) . filter (bk /=)
 
--- | Attach the specified buffer to some other window than the current one
-switchToBufferOtherWindowE :: BufferRef -> EditorM ()
-switchToBufferOtherWindowE b = shiftOtherWindow >> switchToBufferE b
-
 -- | Switch to the buffer specified as parameter. If the buffer name
 -- is empty, switch to the next buffer.
 switchToBufferWithNameE :: T.Text -> EditorM ()
@@ -524,9 +525,8 @@ getBufferWithNameOrCurrent t = withEditor $
 -- | Close current buffer and window, unless it's the last one.
 closeBufferAndWindowE :: EditorM ()
 closeBufferAndWindowE = do
-  -- Fetch the current buffer *before* closing the window. Required
-  -- for the onCloseBufferE actions to work as expected by the
-  -- minibuffer. The tryCloseE, since it uses tabsA, will have the
+  -- Fetch the current buffer *before* closing the window.
+  -- The tryCloseE, since it uses tabsA, will have the
   -- current buffer "fixed" to the buffer of the window that is
   -- brought into focus. If the current buffer is accessed after the
   -- tryCloseE then the current buffer may not be the same as the
@@ -579,12 +579,6 @@ fixCurrentBufferA_ = lens id (\_old new -> let
   -- make sure we do not hold to old versions by seqing the length.
   in NE.length newBufferStack `seq` new & bufferStackA .~ newBufferStack)
 
--- | Counterpart of fixCurrentBufferA_: fix the current window to point to the
--- right buffer.
-fixCurrentWindowE :: EditorM ()
-fixCurrentWindowE =
-  gets currentBuffer >>= \b -> windowsA . PL.focus . bufkeyA .= b
-
 withWindowE :: Window -> BufferM a -> EditorM a
 withWindowE w = withGivenBufferAndWindow w (bufkey w)
 
@@ -619,7 +613,7 @@ focusWindowE k = do
         searchWindowSet r@(True, _, _) _ws = r
 
     case foldl searchWindowSet  (False, 0, 0) ts of
-        (False, _, _) -> fail $ "No window with key " ++ show wkey ++ "found. (focusWindowE)"
+        (False, _, _) -> fail $ "No window with key " ++ show k ++ "found. (focusWindowE)"
         (True, tabIndex, winIndex) -> do
             assign tabsA (fromJust $ PL.moveTo tabIndex ts)
             windowsA %= fromJust . PL.moveTo winIndex
@@ -754,23 +748,6 @@ acceptedInputsOtherWindow = do
   b <- stringToNewBuffer (MemBuffer "keybindings") (fromText $ T.unlines ai)
   w <- newWindowE False b
   windowsA %= PL.insertRight w
-
--- | Defines an action to be executed when the current buffer is closed.
---
--- Used by the minibuffer to assure the focus is restored to the
--- buffer that spawned the minibuffer.
---
--- todo: These actions are not restored on reload.
---
--- todo: These actions should probably be very careful at what they
--- do.
---
--- TODO: All in all, this is a very ugly way to achieve the purpose.
--- The nice way to proceed is to somehow attach the miniwindow to the
--- window that has spawned it.
-onCloseBufferE :: BufferRef -> EditorM () -> EditorM ()
-onCloseBufferE b a =
-  onCloseActionsA %= M.insertWith' (\_ old_a -> old_a >> a) b a
 
 addJumpHereE :: EditorM ()
 addJumpHereE = addJumpAtE =<< withCurrentBuffer pointB
