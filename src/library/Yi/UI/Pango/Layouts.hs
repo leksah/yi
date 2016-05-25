@@ -1,6 +1,10 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_HADDOCK show-extensions #-}
 
 -- |
@@ -48,14 +52,60 @@ import           Data.IORef
 import qualified Data.List.PointedList as PL
 import qualified Data.Text as T
 import           Data.Traversable
-import           Graphics.UI.Gtk as Gtk hiding(Orientation, Layout)
 import           Prelude hiding (mapM)
 import           Yi.Layout(Orientation(..), RelativeSize, DividerPosition,
                            Layout(..), DividerRef)
+import GI.Gtk.Objects.Widget
+       (WidgetK, onWidgetSizeAllocate, toWidget, widgetShowAll,
+        widgetSizeAllocate, widgetSizeRequest, Widget(..))
+import GI.Gtk.Objects.Fixed (fixedNew, Fixed(..))
+import Data.GI.Base
+       (unsafeManagedPtrGetPtr, unsafeCastTo, GObject, castTo, set)
+import GI.Gtk.Objects.Container
+       (ContainerK, containerRemove, Container(..), toContainer,
+        containerChild)
+import Data.GI.Base.Attributes
+       (AttrLabelProxy(..), get, AttrOp(..))
+import qualified Data.GI.Base.Signals as Gtk (on)
+import GI.Gtk.Structs.Requisition
+       (requisitionHeight, requisitionWidth, requisitionReadHeight,
+        requisitionReadWidth, Requisition(..))
+import GI.Gdk.Objects.Screen
+       (screenGetHeight, screenGetWidth, screenGetDefault)
+import GI.Gdk.Structs.Rectangle
+       (rectangleReadHeight, rectangleReadWidth, rectangleReadY,
+        rectangleReadX, rectangleHeight, rectangleWidth, rectangleY,
+        rectangleX, Rectangle(..))
+import GI.Gtk.Objects.Paned
+       (getPanedPosition, panedPosition, panedPack2, panedPack1, toPaned,
+        Paned(..))
+import GI.Gtk.Objects.HPaned (hPanedNew)
+import GI.Gtk.Objects.VPaned (vPanedNew)
+import GI.Gtk.Objects.Bin (toBin, Bin(..))
+import GI.Gtk.Objects.Alignment (alignmentNew)
+import GI.Gtk.Objects.VBox (vBoxNew, VBox(..))
+import GI.Gtk.Objects.Box (boxPackEnd)
+import GI.Gtk.Objects.Notebook
+       (setNotebookPage, getNotebookPage, notebookSetTabLabel,
+        notebookGetTabLabel, onNotebookSwitchPage, notebookPage,
+        notebookPageNum, notebookAppendPage, notebookRemovePage,
+        notebookNew, Notebook(..))
+import Data.GI.Base.Signals (on)
+import Data.Int (Int32)
+import Data.GI.Base.Constructible (Constructible(..))
+import Data.GI.Base.BasicTypes (GObject(..), NullToNothing(..))
+import GI.Gtk.Objects.Label
+       (Label(..), setLabelLabel, getLabelLabel, labelNew)
+import Data.Word (Word32)
+import Foreign.ForeignPtr (ForeignPtr)
+import Data.GI.Base.Overloading (ParentTypes)
+import GI.GObject (Object)
 
 class WidgetLike w where
   -- | Extracts the main widget. This is the widget to be added to the GUI.
-  baseWidget :: w -> Widget
+  baseWidget :: w -> IO Widget
+
+newRectangle x y w h = new Rectangle [rectangleX := x, rectangleY := y, rectangleWidth := w, rectangleHeight := h]
 
 ----------------------- The WeightedStack type
 {- | A @WeightedStack@ is like a 'VBox' or 'HBox', except that we may
@@ -72,8 +122,14 @@ we start off with the concrete class 'Fixed', and just override its
 layout behaviour.
 -}
 
-newtype WeightedStack = WS Fixed
-  deriving(GObjectClass, WidgetClass,ContainerClass)
+newtype WeightedStack = WeightedStack (ForeignPtr WeightedStack)
+
+type instance ParentTypes WeightedStack = WeightedStackParentTypes
+type WeightedStackParentTypes = '[Fixed, Container, Widget, Object]
+
+instance GObject WeightedStack where
+    gobjectIsInitiallyUnowned _ = False
+    gobjectType _ = gobjectType (undefined :: Fixed)
 
 type StackDescr = [(Widget, RelativeSize)]
 
@@ -83,9 +139,8 @@ weightedStackNew o s = do
     "Yi.UI.Pango.WeightedStack.WeightedStack: all weights must be positive"
   l <- fixedNew
   set l (fmap ((containerChild :=) . fst) s)
-  void $ Gtk.on l sizeRequest (doSizeRequest o s)
-  void $ Gtk.on l sizeAllocate (relayout o s)
-  return (WS l)
+  void $ onWidgetSizeAllocate l (relayout o s)
+  unsafeCastTo WeightedStack l
 
 -- | Requests the smallest size so that each widget gets its requested size
 doSizeRequest :: Orientation -> StackDescr -> IO Requisition
@@ -94,40 +149,53 @@ doSizeRequest o s =
     (requestAlong, requestAcross) =
       case o of
         Horizontal ->
-          (\(Requisition w _) -> fromIntegral w,
-           \(Requisition _ h) -> h)
+          (\r -> fromIntegral <$> requisitionReadWidth r,
+           requisitionReadHeight)
         Vertical ->
-          (\(Requisition _ h) -> fromIntegral h,
-           \(Requisition w _) -> w)
+          (\r -> fromIntegral <$> requisitionReadHeight r,
+           requisitionReadWidth)
 
     totalWeight = sum . fmap snd $ s
-    reqsize (request, relSize) = requestAlong request / relSize
+    reqsize :: (Requisition, RelativeSize) -> IO RelativeSize
+    reqsize (request, relSize) = (/ relSize) <$> requestAlong request
+    sizeAlong :: [(Requisition, RelativeSize)] -> IO RelativeSize
     sizeAlong widgetRequests =
-      totalWeight * (maximum . fmap reqsize $ widgetRequests)
+      (totalWeight *) . maximum <$> mapM reqsize widgetRequests
+    sizeAcross :: [(Requisition, RelativeSize)] -> IO Int32
     sizeAcross widgetRequests =
-      maximum . fmap (requestAcross . fst) $ widgetRequests
-    mkRequisition wr =
+      maximum <$> mapM (requestAcross . fst) widgetRequests
+    mkRequisition :: [(Requisition, RelativeSize)] -> IO Requisition
+    mkRequisition wr = do
+      along <- round <$> sizeAlong wr
+      across <- sizeAcross wr
       case o of
-        Horizontal -> Requisition (round $ sizeAlong wr) (sizeAcross wr)
-        Vertical -> Requisition (sizeAcross wr) (round $ sizeAlong wr)
+        Horizontal -> new Requisition [requisitionWidth := along,  requisitionHeight := across]
+        Vertical   -> new Requisition [requisitionWidth := across, requisitionHeight := along]
     swreq (w, relSize) = (,relSize) <$> widgetSizeRequest w
   in
-   boundRequisition =<< mkRequisition <$> mapM swreq s
+   boundRequisition =<< mkRequisition =<< mapM swreq s
 
 
 -- | Bounds the given requisition to not exceed screen dimensions
 boundRequisition :: Requisition -> IO Requisition
-boundRequisition r@(Requisition w h) =
+boundRequisition r =
   do
     mscr <- screenGetDefault
     case mscr of
-      Just scr -> Requisition <$> (min w <$> screenGetWidth scr)
-                              <*> (min h <$> screenGetHeight scr)
+      Just scr -> do
+        w <- requisitionReadWidth r
+        h <- requisitionReadHeight r
+        new Requisition [ requisitionWidth  :=> min w <$> screenGetWidth scr
+                        , requisitionHeight :=> min h <$> screenGetHeight scr ]
       Nothing -> return r
 
 -- | Position the children appropriately for the given width and height
 relayout :: Orientation -> StackDescr -> Rectangle -> IO ()
-relayout o s (Rectangle x y width height) =
+relayout o s r = do
+  x <- rectangleReadX r
+  y <- rectangleReadY r
+  width <- rectangleReadWidth r
+  height <- rectangleReadHeight r
   let
     totalWeight = sum . fmap snd $ s
     totalSpace = fromIntegral $
@@ -138,16 +206,17 @@ relayout o s (Rectangle x y width height) =
     calcPosition pos (widget, wt) = (pos + wt * wtMult,
                                      (pos, wt * wtMult, widget))
     widgetToRectangle (round -> pos, round -> size, widget) =
-      case o of
-        Horizontal -> (Rectangle pos y size height, widget)
-        Vertical -> (Rectangle x pos width size, widget)
+      (, widget) <$>
+        case o of
+          Horizontal -> newRectangle pos y size height
+          Vertical -> newRectangle x pos width size
     startPosition = fromIntegral $
       case o of
         Horizontal -> x
         Vertical -> y
     widgetPositions =
-      fmap widgetToRectangle (snd (mapAccumL calcPosition startPosition s))
-  in forM_ widgetPositions $ \(rect, widget) -> widgetSizeAllocate widget rect
+      mapM widgetToRectangle (snd (mapAccumL calcPosition startPosition s))
+  widgetPositions >>= mapM_ (\(rect, widget) -> widgetSizeAllocate widget rect)
 
 ------------------------------------------------------- SlidingPair
 
@@ -160,18 +229,24 @@ divider position, *as a fraction of the available space*, remains
 constant even when resizing.
 -}
 
-newtype SlidingPair = SP Paned
-  deriving(GObjectClass, WidgetClass, ContainerClass)
+newtype SlidingPair = SlidingPair (ForeignPtr SlidingPair)
 
-slidingPairNew :: (WidgetClass w1, WidgetClass w2) => Orientation -> w1 -> w2
+type instance ParentTypes SlidingPair = SlidingPairParentTypes
+type SlidingPairParentTypes = '[Paned, Container, Widget, Object]
+
+instance GObject SlidingPair where
+    gobjectIsInitiallyUnowned _ = False
+    gobjectType _ = gobjectType (undefined :: Paned)
+
+slidingPairNew :: (WidgetK w1, WidgetK w2) => Orientation -> w1 -> w2
                -> DividerPosition
                -> (DividerPosition -> IO ())
                -> IO SlidingPair
 slidingPairNew o w1 w2 pos handleNewPos = do
   p <-
     case o of
-      Horizontal -> toPaned <$> hPanedNew
-      Vertical -> toPaned <$> vPanedNew
+      Horizontal -> hPanedNew >>= toPaned
+      Vertical -> vPanedNew >>= toPaned
   panedPack1 p w1 True True
   panedPack2 p w2 True True
 
@@ -187,8 +262,10 @@ is also no need to correct the slider position.
   posRef <- newIORef pos
   sizeRef <- newIORef 0
 
-  void $ Gtk.on p sizeAllocate $ \(Rectangle _ _ w h) ->
+  void $ onWidgetSizeAllocate p $ \r ->
     do
+      w <- rectangleReadWidth r
+      h <- rectangleReadHeight r
       oldSz <- readIORef sizeRef
       oldPos <- readIORef posRef
 
@@ -199,7 +276,7 @@ is also no need to correct the slider position.
       when (sz /= 0) $
         if sz == oldSz
         then do -- the slider was moved; store its new position
-          sliderPos <- get p panedPosition
+          sliderPos <- getPanedPosition p
           let newPos = fromIntegral sliderPos / fromIntegral sz
           writeIORef posRef newPos
           when (oldPos /= newPos) $ handleNewPos newPos
@@ -207,7 +284,7 @@ is also no need to correct the slider position.
              -- save the new position
           set p [ panedPosition := round (oldPos * fromIntegral sz) ]
 
-  return (SP p)
+  unsafeCastTo SlidingPair p
 
 ----------------------------- LayoutDisplay
 -- | A container implements 'Layout's.
@@ -241,7 +318,7 @@ layoutDisplayNew :: IO LayoutDisplay
 layoutDisplayNew = do
   cbRef <- newIORef []
   implRef <- newIORef Nothing
-  box <- toBin <$> alignmentNew 0 0 1 1
+  box <- alignmentNew 0 0 1 1 >>= toBin
   return (LD box implRef cbRef)
 
 -- | Registers a callback to a divider changing position. (There is
@@ -268,14 +345,15 @@ layoutDisplaySet ld lyt = do
 
   let applyLayout = do
         impl' <- buildImpl (runCb $ dividerCallbacks ld) lyt
-        widgetShowAll (outerWidget impl')
-        set (mainWidget ld) [containerChild := outerWidget impl']
+        widgetShowAll =<< outerWidget impl'
+        set (mainWidget ld) [containerChild :=> outerWidget impl']
         writeIORef (implWidget ld) (Just impl')
 
   case mimpl of
     Nothing -> applyLayout
     Just impl -> unless (sameLayout impl lyt) $ do
-      unattachWidgets (toContainer $ mainWidget ld) impl
+      container <- toContainer $ mainWidget ld
+      unattachWidgets container impl
       applyLayout
 
 runCb :: IORef [DividerRef -> DividerPosition -> IO ()]
@@ -289,19 +367,21 @@ buildImpl cb = go
     go (SingleWindow w) = return (SingleWindowI w)
     go (s@Stack{}) = do
       impls <- forM (wins s) $ \(lyt,relSize) -> (,relSize) <$> go lyt
-      ws <- weightedStackNew (orientation s) (first outerWidget <$> impls)
+      ws <- weightedStackNew (orientation s) =<< mapM (\(f, s) -> (,s) <$> outerWidget f) impls
       return (StackI (orientation s) impls ws)
     go (p@Pair{}) = do
       w1 <- go (pairFst p)
       w2 <- go (pairSnd p)
-      sp <- slidingPairNew (orientation p) (outerWidget w1)
-                           (outerWidget w2) (divPos p) (cb $ divRef p)
+      o1 <- outerWidget w1
+      o2 <- outerWidget w2
+      sp <- slidingPairNew (orientation p) o1 o2
+                           (divPos p) (cb $ divRef p)
       return $ PairI (orientation p) w1 w2 (divRef p) sp
 
 -- | true if the displayed layout agrees with the given schema, other
 -- than divider positions
 sameLayout :: LayoutImpl -> Layout Widget -> Bool
-sameLayout (SingleWindowI w) (SingleWindow w') = w == w'
+sameLayout (SingleWindowI w) (SingleWindow w') = unsafeManagedPtrGetPtr w == unsafeManagedPtrGetPtr w'
 sameLayout (s@StackI{}) (s'@Stack{}) =
      orientationI s == orientation s'
   && length (winsI s) == length (wins s')
@@ -320,17 +400,19 @@ unattachWidgets :: Container -> LayoutImpl -> IO ()
 unattachWidgets parent (SingleWindowI w) = containerRemove parent w
 unattachWidgets parent s@StackI{} = do
   containerRemove parent (stackWidget s)
-  mapM_ (unattachWidgets (toContainer $ stackWidget s) . fst) (winsI s)
+  container <- toContainer $ stackWidget s
+  mapM_ (unattachWidgets container . fst) (winsI s)
 unattachWidgets parent p@PairI{} = do
   containerRemove parent (pairWidget p)
-  mapM_ (unattachWidgets (toContainer $ pairWidget p)) [pairFstI p, pairSndI p]
+  container <- toContainer $ pairWidget p
+  mapM_ (unattachWidgets container) [pairFstI p, pairSndI p]
 
 
 -- extract the main widget from the tree
-outerWidget :: LayoutImpl -> Widget
-outerWidget s@SingleWindowI{} = singleWidget s
-outerWidget s@StackI{} = toWidget . stackWidget $ s
-outerWidget p@PairI{} = toWidget . pairWidget $ p
+outerWidget :: LayoutImpl -> IO Widget
+outerWidget s@SingleWindowI{} = return $ singleWidget s
+outerWidget s@StackI{} = toWidget $ stackWidget s
+outerWidget p@PairI{} = toWidget $ pairWidget p
 
 instance WidgetLike LayoutDisplay where
   baseWidget = toWidget . mainWidget
@@ -356,9 +438,9 @@ miniwindowDisplaySet mwd ws = do
   curWs <- readIORef (mwdWidgets mwd)
 
   -- we could be more careful here, and only remove the widgets which we need to.
-  when (ws /= curWs) $ do
+  when (map unsafeManagedPtrGetPtr ws /= map unsafeManagedPtrGetPtr curWs) $ do
     forM_ curWs $ containerRemove (mwdMainWidget mwd)
-    forM_ ws $ \w -> boxPackEnd (mwdMainWidget mwd) w PackNatural 0
+    forM_ ws $ \w -> boxPackEnd (mwdMainWidget mwd) w False False 0
     widgetShowAll $ mwdMainWidget mwd
     writeIORef (mwdWidgets mwd) ws
 
@@ -388,21 +470,27 @@ simpleNotebookSet sn ts = do
   let nb = snMainWidget sn
       tsList = toList ts
       curTsList = maybe [] toList curTs
+      changed = case curTs of
+                    Just cts -> fmap (first unsafeManagedPtrGetPtr) cts /= fmap (first unsafeManagedPtrGetPtr) ts
+                    Nothing  -> True
 
   -- the common case is no change at all
-  when (curTs /= Just ts) $ do
+  when changed $ do
 
     -- update the tabs, if they have changed
-    when (fmap fst curTsList /= fmap fst tsList) $ do
+    when (fmap (unsafeManagedPtrGetPtr . fst) curTsList /= fmap (unsafeManagedPtrGetPtr . fst) tsList) $ do
       forM_ curTsList $ const (notebookRemovePage nb (-1))
-      forM_ tsList $ uncurry (notebookAppendPage nb)
+      forM_ tsList $ \(w,s) -> notebookAppendPage nb w =<< Just <$> labelNew (Just s)
 
     -- now update the titles if they have changed
-    forM_ tsList $ \(w,s) -> update nb (notebookChildTabLabel w) s
+    forM_ tsList $ \(w,s) ->
+        nullToNothing (notebookGetTabLabel nb w) >>= fmap join . mapM (castTo Label) >>= \case
+            Just l  -> update l (getLabelLabel, setLabelLabel) s
+            Nothing -> error "Missing label widget in simpleNotebookSet"
 
     -- now set the focus
     p <- notebookPageNum nb (fst $ PL._focus ts)
-    maybe (return ()) (update nb notebookPage) p
+    update nb (getNotebookPage, setNotebookPage) p
 
     -- write the new status
     writeIORef (snTabs sn) (Just ts)
@@ -412,13 +500,33 @@ simpleNotebookSet sn ts = do
 
 
 -- | The 'onSwitchPage' callback
-simpleNotebookOnSwitchPage :: SimpleNotebook -> (Int -> IO ()) -> IO ()
-simpleNotebookOnSwitchPage sn = void . (snMainWidget sn `on` switchPage)
+simpleNotebookOnSwitchPage :: SimpleNotebook -> (Widget -> Word32 -> IO ()) -> IO ()
+simpleNotebookOnSwitchPage sn = void . onNotebookSwitchPage (snMainWidget sn)
 
 
 ------------------- Utils
 -- Only set an attribute if has actually changed.
 -- This makes setting window titles much faster.
-update :: (Eq a) => o -> ReadWriteAttr o a a -> a -> IO ()
-update w attr val = do oldVal <- get w attr
-                       when (val /= oldVal) $ set w [attr := val]
+update :: (Eq a) => o -> (o -> IO a, o -> a -> IO ()) -> a -> IO ()
+update w (get, set) val = do oldVal <- get w
+                             when (val /= oldVal) $ set w val
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

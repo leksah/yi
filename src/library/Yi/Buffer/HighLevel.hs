@@ -119,8 +119,6 @@ module Yi.Buffer.HighLevel
     , vimScrollByB
     , markWord
     , atSof
-    , readCharB
-    , nextPointB
     , prevPointB
     ) where
 

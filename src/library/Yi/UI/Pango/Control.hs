@@ -1,5 +1,5 @@
 {-# LANGUAGE RecordWildCards, ScopedTypeVariables, MultiParamTypeClasses
-           , DeriveDataTypeable, OverloadedStrings
+           , DeriveDataTypeable, OverloadedStrings, PatternSynonyms
            , GeneralizedNewtypeDeriving, FlexibleContexts #-}
 
 -- this module isn't finished, and there's heaps of warnings.
@@ -28,6 +28,15 @@ module Yi.UI.Pango.Control (
 ,   setText
 ,   getText
 ,   keyTable
+,   newColor
+,   newForeground
+,   newBackground
+,   yiForeground
+,   yiBackground
+,   yiColor
+,   pangoScale
+,   fromPango
+,   toPango
 ) where
 
 import Data.Text (unpack, pack, Text)
@@ -60,26 +69,6 @@ import Yi.Style
 import Yi.UI.Utils
 import Yi.Utils
 import Yi.Debug
-import Graphics.UI.Gtk as Gtk
-       (Color(..), PangoRectangle(..), Rectangle(..), selectionDataSetText,
-        targetString, clipboardSetWithData, clipboardRequestText,
-        selectionPrimary, clipboardGetForDisplay, widgetGetDisplay,
-        layoutIndexToPos, layoutGetCursorPos,
-        layoutSetAttributes, widgetGrabFocus,
-        scrolledWindowSetPolicy, scrolledWindowAddWithViewport,
-        scrolledWindowNew, contextGetMetrics, contextGetLanguage,
-        layoutSetFontDescription, layoutEmpty, widgetCreatePangoContext,
-        widgetModifyBg, drawingAreaNew, FontDescription, ScrolledWindow,
-        FontMetrics, Language, DrawingArea, layoutXYToIndex, layoutSetText,
-        layoutGetText, widgetSetSizeRequest, layoutGetPixelExtents,
-        layoutSetWidth, layoutGetWidth, layoutGetFontDescription,
-        PangoLayout, descent, ascent, widgetQueueDraw,
-        mainQuit, signalDisconnect, ConnectId(..), PolicyType(..),
-        StateType(..), EventMask(..), AttrOp(..), Weight(..),
-        PangoAttribute(..), Underline(..), FontStyle(..))
-import qualified Graphics.UI.Gtk as Gtk
-import qualified Graphics.UI.Gtk.Gdk.Events as Gdk.Events
-import System.Glib.GError
 import Control.Monad.Reader (ask, asks, MonadReader(..))
 import Control.Monad.State (ap, get, put, modify)
 import Control.Monad.Base
@@ -92,10 +81,69 @@ import Yi.Regex
 import Yi.String (showT)
 import System.FilePath
 import qualified Yi.UI.Common as Common
-import Graphics.Rendering.Pango.Cairo (showLayout)
+import Data.GI.Base
+       (withManagedPtr, gflagsToWord, gerrorMessage, GError)
+import GI.Gtk
+       (noAdjustment, Clipboard, clipboardSetText, clipboardRequestText,
+        clipboardGetForDisplay, widgetGetDisplay,
+        onWidgetMotionNotifyEvent, onWidgetDraw, onWidgetScrollEvent,
+        onWidgetButtonReleaseEvent, widgetGrabFocus,
+        onWidgetButtonPressEvent, onWidgetKeyPressEvent,
+        scrolledWindowSetPolicy, scrolledWindowAddWithViewport,
+        scrolledWindowNew, widgetCreatePangoContext, widgetModifyBg,
+        drawingAreaNew, ScrolledWindow, DrawingArea, widgetSetSizeRequest,
+        widgetQueueDraw, mainQuit)
+import qualified GI.Gtk as Gtk
+       (widgetCanFocus, widgetAddEvents, widgetGetAllocatedHeight,
+        widgetGetAllocatedWidth)
+import GI.Pango
+       (attrListInsert, attrListNew, AttrList, attrWeightNew,
+        attrUnderlineNew, attrStyleNew, attrBackgroundNew,
+        attrForegroundNew, attributeEndIndex, attributeStartIndex,
+        attrClassType, AttrClass(..), attributeKlass, Attribute(..), Color,
+        layoutIndexToPos, layoutGetCursorPos, layoutSetAttributes,
+        layoutNew, contextGetMetrics, contextGetLanguage,
+        layoutSetFontDescription, layoutXyToIndex, Layout,
+        fontMetricsGetDescent, fontMetricsGetApproximateCharWidth,
+        fontMetricsGetAscent, FontDescription, FontMetrics, Language,
+        layoutSetText, layoutGetText, layoutGetPixelExtents,
+        layoutSetWidth, layoutGetWidth, layoutGetFontDescription)
+import GI.Gdk
+       (keyvalToUnicode, keyvalName, EventKey, atomIntern, pattern BUTTON_MIDDLE,
+        eventMotionReadY, eventMotionReadX, pattern BUTTON_PRIMARY, EventType,
+        colorBlue, colorGreen, colorRed, eventScrollReadDirection,
+        eventButtonReadButton, eventButtonReadType, eventButtonReadY,
+        eventButtonReadX, rectangleReadWidth, rectangleReadX, Rectangle)
+import GI.Gtk.Enums (PolicyType(..), StateType(..))
+import Data.GI.Base.Signals (SignalHandlerId)
+import GI.Gdk.Flags (EventMask(..))
+import qualified Data.GI.Base as Gtk (on, set)
+import Data.GI.Base.Attributes (AttrOp(..))
+import GI.Pango.Enums
+       (AttrType(..), Weight(..), Underline(..), Style(..))
+import GI.PangoCairo (showLayout)
+import GI.Cairo (Context(..))
+import qualified GI.Pango as Pango
+       (rectangleReadHeight, rectangleReadWidth, rectangleReadY,
+        rectangleReadX, Rectangle)
+import Graphics.Rendering.Cairo.Types (Cairo(..))
+import Graphics.Rendering.Cairo (setLineWidth)
 import qualified Graphics.Rendering.Cairo as Cairo
-       (setLineWidth, stroke, moveTo, lineTo, rectangle, setSourceRGB,
-        Render)
+       (setLineWidth, setSourceRGB, stroke, rectangle, lineTo, moveTo)
+import qualified GI.Gdk as Gtk
+       (ModifierType, eventKeyReadState, eventKeyReadKeyval,
+        ScrollDirection, Color(..))
+import qualified Graphics.Rendering.Cairo.Internal as Cairo
+       (Render(..))
+import Data.Word (Word32, Word16)
+import Data.GI.Base.Constructible (Constructible(..))
+import GI.Gdk.Enums (EventType(..))
+import GI.GObject (signalHandlerDisconnect)
+import qualified GI.Gdk.Enums as Gtk (ScrollDirection(..))
+import qualified GI.Gdk.Flags as Gtk (ModifierType(..))
+import Data.Int (Int32)
+import Graphics.Rendering.Cairo.Internal (Render(..))
+import Foreign.Ptr (castPtr)
 
 data Control = Control
     { controlYi :: Yi
@@ -177,15 +225,14 @@ mkUI main yiMVar = Common.dummyUI
     , Common.end           = \_ -> void $ runControl' end yiMVar
     , Common.suspend       = void $ runControl' suspend yiMVar
     , Common.refresh       = \e -> void $ runControl' (refresh e) yiMVar
-    , Common.layout        = \e -> fmap (fromMaybe e) $
-                                   runControl' (doLayout e) yiMVar
+    , Common.layout        = \e -> fromMaybe e <$> runControl' (doLayout e) yiMVar
     , Common.reloadProject = \f -> void $ runControl' (reloadProject f) yiMVar
     }
 
 start :: ControlM () -> UIBoot
 start main cfg ch outCh ed =
-  catch (startNoMsg main cfg ch outCh ed) (\(GError _dom _code msg) ->
-                                            fail $ unpack msg)
+  catch (startNoMsg main cfg ch outCh ed) (\(e :: GError) ->
+                                            fail . unpack =<< gerrorMessage e)
 
 makeControl :: MVar Control -> YiM ()
 makeControl controlMVar = do
@@ -249,6 +296,15 @@ doLayout e = do
     let forceWin x w = height w `seq` winRegion w `seq` x
     return $ (foldl . tabFoldl) forceWin e' (e' ^. tabsA)
 
+pangoScale :: Num a => a
+pangoScale = 1024
+
+fromPango :: Int32 -> Double
+fromPango = (/pangoScale) . fromIntegral
+
+toPango :: Double -> Int32
+toPango = round . (*pangoScale)
+
 -- | Width, Height
 getDimensionsInTab :: Editor -> TabInfo -> ControlM [(WindowRef,Int,Int,Region)]
 getDimensionsInTab e tab = do
@@ -259,12 +315,14 @@ getDimensionsInTab e tab = do
             Just v -> do
                 wi <- liftBase $ Gtk.widgetGetAllocatedWidth $ drawArea v
                 h <- liftBase $ Gtk.widgetGetAllocatedHeight $ drawArea v
-                let lineHeight = ascent (metrics v) + descent (metrics v)
-                    charWidth = Gtk.approximateCharWidth $ metrics v
+                ascent    <- liftBase $ fontMetricsGetAscent (metrics v)
+                descent   <- liftBase $ fontMetricsGetDescent (metrics v)
+                charWidth <- liftBase $ fontMetricsGetApproximateCharWidth (metrics v)
+                let lineHeight = ascent + descent
                     b0 = findBufferWith (viewFBufRef v) e
                 rgn <- shownRegion e v b0
-                let ret= (windowRef v, round $ fromIntegral wi / charWidth,
-                          round $ fromIntegral h / lineHeight, rgn)
+                let ret= (windowRef v, fromIntegral ((wi * pangoScale) `div` charWidth),
+                          fromIntegral ((h * pangoScale) `div` lineHeight), rgn)
                 return $ a <> [ret]
             Nothing -> return a)
       [] (coreTab tab ^. tabWindowsA)
@@ -275,7 +333,7 @@ shownRegion e v b = do
    (tos, _, bos) <- updatePango e v b (layout v)
    return $ mkRegion tos bos
 
-updatePango :: Editor -> View -> FBuffer -> PangoLayout
+updatePango :: Editor -> View -> FBuffer -> Layout
             -> ControlM (Point, Point, Point)
 updatePango e v b layout = do
   width'  <- liftBase $ Gtk.widgetGetAllocatedWidth  $ drawArea v
@@ -291,10 +349,12 @@ updatePango e v b layout = do
   --when (oldFontStr /= newFontStr)
   --  (layoutSetFontDescription layout (Just font))
 
+  ascent  <- liftBase $ fontMetricsGetAscent  (metrics v)
+  descent <- liftBase $ fontMetricsGetDescent (metrics v)
   let win                 = findWindowWith (windowRef v) e
-      [width'', height''] = map fromIntegral [width', height']
-      lineHeight          = ascent (metrics v) + descent (metrics v)
-      winh                = max 1 $ floor (height'' / lineHeight)
+      [width'', height''] = map (*pangoScale) [width', height']
+      lineHeight          = ascent + descent
+      winh                = max 1 $ fromIntegral (height'' `div` lineHeight)
 
       (tos, point, text)  = askBuffer win b $ do
                               from <- (use . markPointA) =<< fromMark <$> askMarks
@@ -310,18 +370,19 @@ updatePango e v b layout = do
   config   <- liftYi askCfg
   if configLineWrap $ configUI config
     then do oldWidth <- liftBase $ layoutGetWidth layout
-            when (oldWidth /= Just width'') $
-              liftBase $ layoutSetWidth layout $ Just width''
-    else do
-    (Rectangle px _py pwidth _pheight, _) <- liftBase $
-                                             layoutGetPixelExtents layout
-    liftBase $ widgetSetSizeRequest (drawArea v) (px+pwidth) (-1)
+            when (oldWidth /= width'') $
+              liftBase $ layoutSetWidth layout width''
+    else liftBase $ do
+      (r, _) <- layoutGetPixelExtents layout
+      px <- Pango.rectangleReadX r
+      pwidth <- Pango.rectangleReadWidth r
+      widgetSetSizeRequest (drawArea v) (px+pwidth) (-1)
 
   -- optimize for cursor movement
   oldText <- liftBase $ layoutGetText layout
-  when (oldText /= text) $ liftBase $ layoutSetText layout text
+  when (oldText /= text) $ liftBase $ layoutSetText layout text (-1)
 
-  (_, bosOffset, _) <- liftBase $ layoutXYToIndex layout width''
+  (_, bosOffset, _) <- liftBase $ layoutXyToIndex layout width''
                        (fromIntegral winh * lineHeight - 1)
   return (tos, point, tos + fromIntegral bosOffset + 1)
 
@@ -468,12 +529,12 @@ data View = View
     { viewFBufRef :: BufferRef
     , windowRef   :: WindowRef
     , drawArea    :: DrawingArea
-    , layout      :: PangoLayout
+    , layout      :: Layout
     , language    :: Language
     , metrics     :: FontMetrics
     , scrollWin   :: ScrolledWindow
     , shownTos    :: IORef Point
-    , winMotionSignal :: IORef (Maybe (ConnectId DrawingArea))
+    , winMotionSignal :: IORef (Maybe SignalHandlerId)
     }
 
 data Iter = Iter
@@ -501,19 +562,19 @@ newView buffer font = do
         e <- get
         put $ focusAllSyntax e
     drawArea <- liftBase drawingAreaNew
-    liftBase . widgetModifyBg drawArea StateNormal . mkCol False
-      . Yi.Style.background . baseAttributes . configStyle $ configUI config
+    liftBase . widgetModifyBg drawArea StateTypeNormal . Just =<< liftBase (newBackground
+      . Yi.Style.background . baseAttributes . configStyle $ configUI config)
     context  <- liftBase $ widgetCreatePangoContext drawArea
-    layout   <- liftBase $ layoutEmpty context
+    layout   <- liftBase $ layoutNew context
     liftBase $ layoutSetFontDescription layout (Just font)
     language <- liftBase $ contextGetLanguage context
-    metrics  <- liftBase $ contextGetMetrics context font language
-    liftBase $ layoutSetText layout ("" :: Text)
+    metrics  <- liftBase $ contextGetMetrics context (Just font) (Just language)
+    liftBase $ layoutSetText layout "" (-1)
 
-    scrollWin <- liftBase $ scrolledWindowNew Nothing Nothing
+    scrollWin <- liftBase $ scrolledWindowNew noAdjustment noAdjustment
     liftBase $ do
         scrolledWindowAddWithViewport scrollWin drawArea
-        scrolledWindowSetPolicy scrollWin PolicyAutomatic PolicyNever
+        scrolledWindowSetPolicy scrollWin PolicyTypeAutomatic PolicyTypeNever
 
     initialTos <-
       liftYi . withEditor . withGivenBufferAndWindow newWindow viewFBufRef $
@@ -523,37 +584,39 @@ newView buffer font = do
 
     let view = View {..}
 
-    liftBase $ Gtk.widgetAddEvents drawArea [KeyPressMask]
+    liftBase $ Gtk.widgetAddEvents drawArea (gflagsToWord [EventMaskKeyPressMask])
     liftBase $ Gtk.set drawArea [Gtk.widgetCanFocus := True]
 
-    liftBase $ Gtk.on drawArea Gtk.keyPressEvent $ do
+    liftBase $ onWidgetKeyPressEvent drawArea $ \e -> do
         -- putStrLn $ "Yi Control Key Press = " <> show event
         liftBase $ runControl (runAction $ makeAction $ do
             focusWindowE windowRef
             switchToBufferE viewFBufRef) control
-        result <- processKeyEvent (yiInput $ controlYi control)
+        result <- processKeyEvent (yiInput $ controlYi control) e
         liftBase $ widgetQueueDraw drawArea
         return result
 
-    liftBase $ Gtk.on drawArea Gtk.buttonPressEvent $ do
-        (x, y) <- Gtk.eventCoordinates
-        click <- Gtk.eventClick
-        button <- Gtk.eventButton
+    liftBase $ onWidgetButtonPressEvent drawArea $ \e -> do
+        x <- eventButtonReadX e
+        y <- eventButtonReadY e
+        click <- eventButtonReadType e
+        button <- eventButtonReadButton e
         liftBase $ do
             widgetGrabFocus drawArea
             runControl (handleClick view x y click button) control
 
-    liftBase $ Gtk.on drawArea Gtk.buttonReleaseEvent $ do
-        (x, y) <- Gtk.eventCoordinates
-        click <- Gtk.eventClick
-        button <- Gtk.eventButton
+    liftBase $ onWidgetButtonReleaseEvent drawArea $ \e -> do
+        x <- eventButtonReadX e
+        y <- eventButtonReadY e
+        click <- eventButtonReadType e
+        button <- eventButtonReadButton e
         liftBase $ runControl (handleClick view x y click button) control
 
-    liftBase $ Gtk.on drawArea Gtk.scrollEvent $ do
-        direction <- Gtk.eventScrollDirection
+    liftBase $ onWidgetScrollEvent drawArea $ \e -> do
+        direction <- eventScrollReadDirection e
         liftBase $ runControl (handleScroll view direction) control
 
-    liftBase $ Gtk.on drawArea Gtk.draw $ do
+    liftBase $ onWidgetDraw drawArea $ \context -> do
         (text, allAttrs, debug, tos, rel, point, inserting) <- liftIO $ runControl (liftYi $ withEditor $ do
             window <- (findWindowWith windowRef) <$> get
             (%=) buffersA (fmap (clearSyntax . clearHighlight))
@@ -595,18 +658,28 @@ newView buffer font = do
                                                 , s /= emptyAttributes ]
 
                     rel p = fromIntegral (p - tos)
-                    allAttrs = concat $ do
-                      (p1, Attributes fg bg _rv bd itlc udrl, p2) <- strokes
-                      let atr x = x (rel p1) (rel p2)
-                          if' p x y = if p then x else y
-                      return [ atr AttrForeground $ mkCol True fg
-                             , atr AttrBackground $ mkCol False bg
-                             , atr AttrStyle $ if' itlc StyleItalic StyleNormal
-                             , atr AttrUnderline $
+                    allAttrs :: MonadIO m => m AttrList
+                    allAttrs = do
+                      list <- attrListNew
+                      forM_ strokes $ \(p1, Attributes fg bg _rv bd itlc udrl, p2) -> do
+                        let atr :: MonadIO m => m Attribute -> m ()
+                            atr newAttr = do
+                                a <- newAttr
+                                Gtk.set a
+                                    [ attributeStartIndex := rel p1
+                                    , attributeEndIndex := rel p2
+                                    ]
+                                attrListInsert list a
+                        let if' p x y = if p then x else y
+                        mapM_ atr
+                             [ yiForeground attrForegroundNew fg
+                             , yiBackground attrBackgroundNew bg
+                             , attrStyleNew $ if' itlc StyleItalic StyleNormal
+                             , attrUnderlineNew $
                                  if' udrl UnderlineSingle UnderlineNone
-                             , atr AttrWeight $ if' bd WeightBold WeightNormal
+                             , attrWeightNew $ if' bd WeightBold WeightNormal
                              ]
-
+                      return list
 
                 return (text, allAttrs, (picture, strokes, modeNm,
                                          window, tos, bos, winh),
@@ -614,30 +687,39 @@ newView buffer font = do
 
         liftIO $ do
             -- putStrLn $ "Setting Layout Attributes " <> show debug
-            layoutSetAttributes layout allAttrs
+            layoutSetAttributes layout . Just =<< allAttrs
             -- putStrLn "Done Stting Layout Attributes"
             -- dw      <- widgetGetDrawWindow drawArea
             -- gc      <- gcNew dw
             oldText <- layoutGetText layout
-            when (text /= oldText) $ layoutSetText layout text
-        showLayout layout
+            when (text /= oldText) $ layoutSetText layout text (-1)
+        showLayout context layout
         liftIO $ writeIORef shownTos tos
 
         -- paint the cursor
-        (PangoRectangle curx cury curw curh, _) <- liftIO $ layoutGetCursorPos layout (rel point)
-        PangoRectangle chx chy chw chh          <- liftIO $ layoutIndexToPos layout (rel point)
+        (curRect, _) <- layoutGetCursorPos layout (rel point)
+        curx <- Pango.rectangleReadX curRect
+        cury <- Pango.rectangleReadY curRect
+        curw <- Pango.rectangleReadWidth curRect
+        curh <- Pango.rectangleReadHeight curRect
+        chRect <- liftIO $ layoutIndexToPos layout (rel point)
+        chx <- Pango.rectangleReadX chRect
+        chy <- Pango.rectangleReadY chRect
+        chw <- Pango.rectangleReadWidth chRect
+        chh <- Pango.rectangleReadHeight chRect
 
-        -- gcSetValues gc (newGCValues { Gtk.foreground = mkCol True $ Yi.Style.foreground $ baseAttributes $ configStyle $ configUI config })
-        sourceCol True $ Yi.Style.foreground $ baseAttributes $ configStyle $ configUI config
-        Cairo.setLineWidth 2
-        if inserting
-            then do
-                Cairo.moveTo curx cury
-                Cairo.lineTo (curx + curw) (cury + curh)
-            else do Cairo.rectangle chx chy (if chw > 0 then chw else 8) chh
-        Cairo.stroke
+        -- gcSetValues gc (newGCValues { Gtk.foreground = newForeground $ Yi.Style.foreground $ baseAttributes $ configStyle $ configUI config })
+        withManagedPtr context $ \cPtr -> (`runReaderT` Cairo (castPtr cPtr)) . runRender $ do
+            sourceCol True $ Yi.Style.foreground $ baseAttributes $ configStyle $ configUI config
+            Cairo.setLineWidth 2
+            if inserting
+                then do
+                    Cairo.moveTo (fromPango curx) (fromPango cury)
+                    Cairo.lineTo (fromPango curx + fromPango curw) (fromPango cury + fromPango curh)
+                else Cairo.rectangle (fromPango chx) (fromPango chy) (if chw > 0 then fromPango chw else 8) (fromPango chh)
+            Cairo.stroke
 
-        return ()
+        return True
 
     liftBase $ widgetGrabFocus drawArea
 
@@ -701,11 +783,20 @@ getText :: Buffer -> Iter -> Iter -> ControlM Text
 getText b Iter{point = p1} Iter{point = p2} =
   fmap toText . withBuffer b . readRegionB $ mkRegion p1 p2
 
-mkCol :: Bool -- ^ is foreground?
-      -> Yi.Style.Color -> Gtk.Color
-mkCol True  Default = Color 0 0 0
-mkCol False Default = Color maxBound maxBound maxBound
-mkCol _ (RGB x y z) = Color (fromIntegral x * 256)
+newColor :: MonadIO m => Word16 -> Word16 -> Word16 -> m Gtk.Color
+newColor r g b = new Gtk.Color [colorRed := r, colorGreen := g, colorBlue := b]
+
+newForeground, newBackground :: MonadIO m => Yi.Style.Color -> m Gtk.Color
+newForeground = yiForeground newColor
+newBackground = yiBackground newColor
+
+yiForeground, yiBackground :: (Word16 -> Word16 -> Word16 -> a) -> Yi.Style.Color -> a
+yiForeground = yiColor 0
+yiBackground = yiColor maxBound
+
+yiColor :: Word16 -> (Word16 -> Word16 -> Word16 -> a) -> Yi.Style.Color -> a
+yiColor d f Default = f d d d
+yiColor _ f (RGB x y z) = f (fromIntegral x * 256)
                             (fromIntegral y * 256)
                             (fromIntegral z * 256)
 
@@ -717,7 +808,7 @@ sourceCol _ (RGB r g b) = Cairo.setSourceRGB (fromIntegral r / 255)
                                              (fromIntegral g / 255)
                                              (fromIntegral b / 255)
 
-handleClick :: View -> Double -> Double -> Gtk.Click -> Gtk.MouseButton -> ControlM Bool
+handleClick :: View -> Double -> Double -> EventType -> Word32 -> ControlM Bool
 handleClick view x y click button = do
   control  <- ask
   -- (_tabIdx,winIdx,w) <- getWinInfo ref <$> readIORef (tabCache ui)
@@ -725,7 +816,7 @@ handleClick view x y click button = do
   logPutStrLn $ "Click: " <> showT (x, y, click)
 
   -- retrieve the clicked offset.
-  (_,layoutIndex,_) <- io $ layoutXYToIndex (layout view) x y
+  (_,layoutIndex,_) <- io $ layoutXyToIndex (layout view) (toPango x) (toPango y)
   tos <- liftBase $ readIORef (shownTos view)
   let p1 = tos + fromIntegral layoutIndex
 
@@ -738,19 +829,20 @@ handleClick view x y click button = do
       -- TODO: check that tabIdx is the focus?
 --      (%=) windowsA (fromJust . PL.move winIdx)
 
-  liftBase $ case (click, button) of
-     (Gtk.SingleClick, Gtk.LeftButton) -> do
-        cid <- Gtk.on (drawArea view) Gtk.motionNotifyEvent $ do
-            (x, y) <- Gtk.eventCoordinates
+  liftBase $ case (click, fromIntegral button) of
+     (EventTypeButtonPress, BUTTON_PRIMARY) -> do
+        cid <- onWidgetMotionNotifyEvent (drawArea view) $ \e -> do
+            x <- eventMotionReadX e
+            y <- eventMotionReadY e
             liftBase $ runControl (handleMove view p1 x y) control
         writeIORef (winMotionSignal view) $ Just cid
 
      _ -> do
-       maybe (return ()) signalDisconnect =<< readIORef (winMotionSignal view)
+       maybe (return ()) (signalHandlerDisconnect (drawArea view)) =<< readIORef (winMotionSignal view)
        writeIORef (winMotionSignal view) Nothing
 
-  case (click, button) of
-    (Gtk.SingleClick, Gtk.LeftButton) -> runAction . EditorA $ do
+  case (click, fromIntegral button) of
+    (EventTypeButtonPress, BUTTON_PRIMARY) -> runAction . EditorA $ do
         -- b <- gets $ (bkey . findBufferWith (viewFBufRef view))
         -- focusWindow
         window <- findWindowWith winRef <$> get
@@ -758,18 +850,18 @@ handleClick view x y click button = do
             moveTo p1
             setVisibleSelection False
     -- (Gtk.SingleClick, _) -> runAction focusWindow
-    (Gtk.ReleaseClick, Gtk.MiddleButton) -> do
+    (EventTypeButtonRelease, BUTTON_MIDDLE) -> do
         disp <- liftBase $ widgetGetDisplay (drawArea view)
-        cb <- liftBase $ clipboardGetForDisplay disp selectionPrimary
-        let cbHandler :: Maybe R.YiString -> IO ()
-            cbHandler Nothing = return ()
-            cbHandler (Just txt) = runControl (runAction . EditorA $ do
+        cb <- liftBase $ clipboardGetForDisplay disp =<< atomIntern "PRIMARY" False
+        let cbHandler :: Clipboard -> Maybe Text -> IO ()
+            cbHandler _ Nothing = return ()
+            cbHandler _ (Just txt) = runControl (runAction . EditorA $ do
                 window <- findWindowWith winRef <$> get
                 withGivenBufferAndWindow window (viewFBufRef view) $ do
                     pointB >>= setSelectionMarkPointB
                     moveTo p1
-                    insertN txt) control
-        liftBase $ clipboardRequestText cb (cbHandler . fmap R.fromText)
+                    insertN (R.fromText txt)) control
+        liftBase $ clipboardRequestText cb cbHandler
     _ -> return ()
 
   liftBase $ widgetQueueDraw (drawArea view)
@@ -779,8 +871,8 @@ handleScroll :: View -> Gtk.ScrollDirection -> ControlM Bool
 handleScroll view direction = do
   let editorAction =
         withCurrentBuffer $ vimScrollB $ case direction of
-                        Gtk.ScrollUp   -> -1
-                        Gtk.ScrollDown -> 1
+                        Gtk.ScrollDirectionUp   -> -1
+                        Gtk.ScrollDirectionDown -> 1
                         _ -> 0 -- Left/right scrolling not supported
 
   runAction $ EditorA editorAction
@@ -792,7 +884,7 @@ handleMove view p0 x y = do
   logPutStrLn $ "Motion: " <> showT (x, y)
 
   -- retrieve the clicked offset.
-  (_,layoutIndex,_) <- liftBase $ layoutXYToIndex (layout view) x y
+  (_,layoutIndex,_) <- liftBase $ layoutXyToIndex (layout view) (toPango x) (toPango y)
   tos <- liftBase $ readIORef (shownTos view)
   let p1 = tos + fromIntegral layoutIndex
 
@@ -822,35 +914,36 @@ handleMove view p0 x y = do
   txt <- liftBase $ readIORef selection
 
   disp <- liftBase $ widgetGetDisplay (drawArea view)
-  cb <- liftBase $ clipboardGetForDisplay disp selectionPrimary
-  liftBase $ clipboardSetWithData cb [(targetString,0)]
-      (\0 -> void (selectionDataSetText $ R.toText txt)) (return ())
+  cb <- liftBase $ clipboardGetForDisplay disp =<< atomIntern "PRIMARY" False
+  liftBase $ clipboardSetText cb (R.toText txt) (-1)
 
   liftBase $ widgetQueueDraw (drawArea view)
   return True
 
-processKeyEvent :: ([Event] -> IO ()) -> Gtk.EventM Gtk.EKey Bool
-processKeyEvent ch = do
+processKeyEvent :: ([Event] -> IO ()) -> EventKey -> IO Bool
+processKeyEvent ch ev = do
   -- logPutStrLn $ "Gtk.Event: " <> show ev
   -- logPutStrLn $ "Event: " <> show (gtkToYiEvent ev)
-  name <- Gtk.eventKeyName
-  mod <- Gtk.eventModifier
-  char <- Gtk.eventKeyVal >>= liftBase . Gtk.keyvalToChar
+  keyval <- Gtk.eventKeyReadKeyval ev
+  name   <- keyvalName keyval
+  mod    <- Gtk.eventKeyReadState ev
+  char   <- toEnum . fromIntegral <$> keyvalToUnicode keyval
   case gtkToYiEvent name mod char of
     Nothing -> logPutStrLn $ "Event not translatable: " <> showT (name, mod, char)
     Just e -> liftBase $ ch [e]
   return True
 
-gtkToYiEvent :: Text -> [Gtk.Modifier] -> Maybe Char -> Maybe Event
+gtkToYiEvent :: Maybe Text -> [Gtk.ModifierType] -> Char -> Maybe Event
 gtkToYiEvent key evModifier char
     = fmap (\k -> Event k $ (nub $ (if isShift then filter (/= MShift) else id) $ concatMap modif evModifier)) key'
       where (key',isShift) =
-                case char of
-                  Just c | c >= ' ' -> (Just $ KASCII c, True)
-                  _ -> (Map.lookup key keyTable, False)
-            modif Gtk.Control = [MCtrl]
-            modif Gtk.Alt = [MMeta]
-            modif Gtk.Shift = [MShift]
+                case (char, key) of
+                  (c, _) | c >= ' ' -> (Just $ KASCII c, True)
+                  (_, Just k)       -> (Map.lookup k keyTable, False)
+                  _                 -> (Nothing, False)
+            modif Gtk.ModifierTypeControlMask = [MCtrl]
+            modif Gtk.ModifierTypeMetaMask    = [MMeta]
+            modif Gtk.ModifierTypeShiftMask   = [MShift]
             modif _ = []
 
 -- | Map GTK long names to Keys

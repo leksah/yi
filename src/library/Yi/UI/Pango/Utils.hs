@@ -1,3 +1,4 @@
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Random GTK utils
@@ -8,16 +9,22 @@ import Control.Exception (catch, throw)
 import Data.Text (append)
 import Paths_yi
 import System.FilePath
-import Graphics.UI.Gtk
-import System.Glib.GError
+import GI.GdkPixbuf.Objects.Pixbuf
+       (pixbufAddAlpha, pixbufNewFromFile, Pixbuf(..))
+import Data.GI.Base
+       (gerrorNew, gerrorMessage, gerrorCode, gerrorDomain, GError)
+import qualified Data.Text as T (pack)
 
 loadIcon :: FilePath -> IO Pixbuf
 loadIcon fpath = do
   iconfile <- getDataFileName $ "art" </> fpath
   icoProject <-
-    catch (pixbufNewFromFile iconfile)
-    (\(GError dom code msg) ->
-      throw $ GError dom code $
+    catch (pixbufNewFromFile $ T.pack iconfile)
+    (\(e :: GError) -> do
+      dom  <- gerrorDomain e
+      code <- gerrorCode e
+      msg  <- gerrorMessage e
+      throw =<< gerrorNew dom code (
         msg `append` " -- use the yi_datadir environment variable to"
-            `append` " specify an alternate location")
-  pixbufAddAlpha icoProject (Just (0,255,0))
+            `append` " specify an alternate location"))
+  pixbufAddAlpha icoProject True 0 255 0
