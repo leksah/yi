@@ -127,9 +127,11 @@ import GI.Gdk
         EventScroll, atomIntern, eventButtonReadButton,
         eventButtonReadType, eventButtonReadY, eventButtonReadX,
         EventButton, ModifierType, keyvalToUnicode, keyvalName,
-        eventKeyReadKeyval, eventKeyReadState, EventKey, rectangleY,
-        rectangleX, Rectangle(..), rectangleHeight, rectangleWidth,
+        eventKeyReadKeyval, eventKeyReadState, EventKey,
         colorBlue, colorGreen, colorRed)
+import Yi.UI.Pango.Rectangle
+        (rectangleY, rectangleX, Rectangle(..), rectangleHeight, 
+        rectangleWidth, newRectangle)
 import qualified Graphics.Rendering.Cairo as Cairo
        (setSourceRGB, stroke, rectangle, lineTo, moveTo, setLineWidth)
 import Data.Word (Word16)
@@ -405,7 +407,7 @@ setWindowFocus e ui t w = do
   update (modeline w) (getLabelLabel, setLabelLabel) ml
   writeIORef (fullTitle t) bufferName
   writeIORef (abbrevTitle t) (tabAbbrevTitle bufferName)
-  drawW <- catch (widgetGetWindow $ textview w)
+  drawW <- catch (fmap Just . widgetGetWindow $ textview w)
                  (\(_ :: SomeException) -> return Nothing)
   iMContextSetClientWindow im drawW
   iMContextFocusIn im
@@ -633,7 +635,7 @@ render ui w context =
     curY <- fromPango <$> Pango.rectangleReadY r
     curW <- fromPango <$> Pango.rectangleReadWidth r
     curH <- fromPango <$> Pango.rectangleReadHeight r
-    gdkRectangle <- new Rectangle
+    gdkRectangle <- newRectangle
         [ rectangleX := round curX
         , rectangleY := round curY
         , rectangleWidth := round curW
@@ -760,14 +762,13 @@ updatePango ui font w b layout = do
           -- alternative would be to assign each buffer its own font
           -- but that seems a pain to maintain and if the user never
           -- changes font sizes, it's a waste of memory.
-          Just nf <- fontDescriptionCopy font
+          nf <- fontDescriptionCopy font
           fontDescriptionSetSize nf (toPango newSize)
           return nf
 
   oldFont <- layoutGetFontDescription layout
-  oldFontStr <- maybe (return Nothing)
-                (fmap Just . fontDescriptionToStringT) oldFont
-  newFontStr <- Just <$> fontDescriptionToStringT curFont
+  oldFontStr <- fontDescriptionToStringT oldFont
+  newFontStr <- fontDescriptionToStringT curFont
 
   when (oldFontStr /= newFontStr) $
     layoutSetFontDescription layout (Just curFont)

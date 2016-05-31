@@ -72,10 +72,10 @@ import GI.Gtk.Structs.Requisition
         requisitionReadWidth, Requisition(..))
 import GI.Gdk.Objects.Screen
        (screenGetHeight, screenGetWidth, screenGetDefault)
-import GI.Gdk.Structs.Rectangle
+import Yi.UI.Pango.Rectangle
        (rectangleReadHeight, rectangleReadWidth, rectangleReadY,
         rectangleReadX, rectangleHeight, rectangleWidth, rectangleY,
-        rectangleX, Rectangle(..))
+        rectangleX, Rectangle(..), newRectangle)
 import GI.Gtk.Objects.Paned
        (getPanedPosition, panedPosition, panedPack2, panedPack1, toPaned,
         Paned(..))
@@ -104,8 +104,6 @@ import GI.GObject (Object)
 class WidgetLike w where
   -- | Extracts the main widget. This is the widget to be added to the GUI.
   baseWidget :: w -> IO Widget
-
-newRectangle x y w h = new Rectangle [rectangleX := x, rectangleY := y, rectangleWidth := w, rectangleHeight := h]
 
 ----------------------- The WeightedStack type
 {- | A @WeightedStack@ is like a 'VBox' or 'HBox', except that we may
@@ -208,8 +206,8 @@ relayout o s r = do
     widgetToRectangle (round -> pos, round -> size, widget) =
       (, widget) <$>
         case o of
-          Horizontal -> newRectangle pos y size height
-          Vertical -> newRectangle x pos width size
+          Horizontal -> newRectangle [rectangleX := pos, rectangleY := y, rectangleWidth := size, rectangleHeight := height]
+          Vertical -> newRectangle [rectangleX := x, rectangleY := pos, rectangleWidth := width, rectangleHeight := size]
     startPosition = fromIntegral $
       case o of
         Horizontal -> x
