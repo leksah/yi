@@ -113,7 +113,8 @@ import GI.Gdk
         eventMotionReadY, eventMotionReadX, pattern BUTTON_PRIMARY, EventType,
         colorBlue, colorGreen, colorRed, eventScrollReadDirection,
         eventButtonReadButton, eventButtonReadType, eventButtonReadY,
-        eventButtonReadX, rectangleReadWidth, rectangleReadX, Rectangle)
+        eventButtonReadX)
+import Yi.UI.Pango.Rectangle (rectangleReadWidth, rectangleReadX, Rectangle)
 import GI.Gtk.Enums (PolicyType(..), StateType(..))
 import Data.GI.Base.Signals (SignalHandlerId)
 import GI.Gdk.Flags (EventMask(..))

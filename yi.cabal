@@ -107,6 +107,9 @@ flag hint
   Default: True
   Description: Include hint (haskell interpreter) in yi
 
+flag gdk-318
+  Description: GDK is 3.18 or later
+
 library
   hs-source-dirs: src/library
   default-language: Haskell2010
@@ -119,6 +122,10 @@ library
 
   if flag(hint)
     CPP-options: -DHINT
+
+  if flag(gdk-318)
+    pkgconfig-depends: gdk-3.0 >= 3.18
+    cpp-options: -DMIN_VERSION_GDK_3_18
 
   exposed-modules:
     Yi
@@ -332,6 +339,7 @@ library
     other-modules:
       Yi.UI.Pango.Layouts
       Yi.UI.Pango.Utils
+      Yi.UI.Pango.Rectangle
     build-depends:
       cairo           >= 0.13   && < 0.14,
       haskell-gi-base >= 0.17   && < 0.18,
