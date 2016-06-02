@@ -130,7 +130,7 @@ import GI.Gdk
         eventKeyReadKeyval, eventKeyReadState, EventKey,
         colorBlue, colorGreen, colorRed)
 import Yi.UI.Pango.Rectangle
-        (rectangleY, rectangleX, Rectangle(..), rectangleHeight, 
+        (rectangleY, rectangleX, Rectangle(..), rectangleHeight,
         rectangleWidth, newRectangle)
 import qualified Graphics.Rendering.Cairo as Cairo
        (setSourceRGB, stroke, rectangle, lineTo, moveTo, setLineWidth)
@@ -150,6 +150,7 @@ import Data.GI.Base.ManagedPtr (withManagedPtr)
 import Graphics.Rendering.Cairo.Types (Cairo(..))
 import Foreign.Ptr (castPtr)
 import Data.Int (Int32)
+import Data.GI.Base.BasicTypes (NullToNothing(..))
 
 -- We use IORefs in all of these datatypes for all fields which could
 -- possibly change over time.  This ensures that no 'UI', 'TabInfo',
@@ -407,7 +408,7 @@ setWindowFocus e ui t w = do
   update (modeline w) (getLabelLabel, setLabelLabel) ml
   writeIORef (fullTitle t) bufferName
   writeIORef (abbrevTitle t) (tabAbbrevTitle bufferName)
-  drawW <- catch (fmap Just . widgetGetWindow $ textview w)
+  drawW <- catch (nullToNothing $ widgetGetWindow $ textview w)
                  (\(_ :: SomeException) -> return Nothing)
   iMContextSetClientWindow im drawW
   iMContextFocusIn im
@@ -762,13 +763,14 @@ updatePango ui font w b layout = do
           -- alternative would be to assign each buffer its own font
           -- but that seems a pain to maintain and if the user never
           -- changes font sizes, it's a waste of memory.
-          nf <- fontDescriptionCopy font
+          Just nf <- nullToNothing $ fontDescriptionCopy font
           fontDescriptionSetSize nf (toPango newSize)
           return nf
 
-  oldFont <- layoutGetFontDescription layout
-  oldFontStr <- fontDescriptionToStringT oldFont
-  newFontStr <- fontDescriptionToStringT curFont
+  oldFont <- nullToNothing $ layoutGetFontDescription layout
+  oldFontStr <- maybe (return Nothing)
+                (fmap Just . fontDescriptionToStringT) oldFont
+  newFontStr <- Just <$> fontDescriptionToStringT curFont
 
   when (oldFontStr /= newFontStr) $
     layoutSetFontDescription layout (Just curFont)
