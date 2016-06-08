@@ -56,14 +56,14 @@ import           Prelude hiding (mapM)
 import           Yi.Layout(Orientation(..), RelativeSize, DividerPosition,
                            Layout(..), DividerRef)
 import GI.Gtk.Objects.Widget
-       (WidgetK, onWidgetSizeAllocate, toWidget, widgetShowAll,
+       (WidgetK(..), onWidgetSizeAllocate, toWidget, widgetShowAll,
         widgetSizeAllocate, widgetSizeRequest, Widget(..))
-import GI.Gtk.Objects.Fixed (fixedNew, Fixed(..))
+import GI.Gtk.Objects.Fixed (fixedNew, Fixed(..), FixedK(..))
 import Data.GI.Base
        (unsafeManagedPtrGetPtr, unsafeCastTo, GObject, castTo, set)
 import GI.Gtk.Objects.Container
-       (ContainerK, containerRemove, Container(..), toContainer,
-        containerChild)
+       (containerRemove, Container(..), toContainer,
+        ContainerK(..))
 import Data.GI.Base.Attributes
        (AttrLabelProxy(..), get, AttrOp(..))
 import qualified Data.GI.Base.Signals as Gtk (on)
@@ -77,8 +77,8 @@ import Yi.UI.Pango.Rectangle
         rectangleReadX, rectangleHeight, rectangleWidth, rectangleY,
         rectangleX, Rectangle(..), newRectangle)
 import GI.Gtk.Objects.Paned
-       (getPanedPosition, panedPosition, panedPack2, panedPack1, toPaned,
-        Paned(..))
+       (getPanedPosition, panedPack2, panedPack1, toPaned,
+        Paned(..), PanedK(..))
 import GI.Gtk.Objects.HPaned (hPanedNew)
 import GI.Gtk.Objects.VPaned (vPanedNew)
 import GI.Gtk.Objects.Bin (toBin, Bin(..))
@@ -87,7 +87,7 @@ import GI.Gtk.Objects.VBox (vBoxNew, VBox(..))
 import GI.Gtk.Objects.Box (boxPackEnd)
 import GI.Gtk.Objects.Notebook
        (setNotebookPage, getNotebookPage, notebookSetTabLabel,
-        notebookGetTabLabel, onNotebookSwitchPage, notebookPage,
+        notebookGetTabLabel, onNotebookSwitchPage,
         notebookPageNum, notebookAppendPage, notebookRemovePage,
         notebookNew, Notebook(..))
 import Data.GI.Base.Signals (on)
@@ -100,6 +100,7 @@ import Data.Word (Word32)
 import Foreign.ForeignPtr (ForeignPtr)
 import Data.GI.Base.Overloading (ParentTypes)
 import GI.GObject (Object)
+import GI.Gtk (setContainerChild, setPanedPosition, containerAdd)
 
 class WidgetLike w where
   -- | Extracts the main widget. This is the widget to be added to the GUI.
@@ -124,6 +125,9 @@ newtype WeightedStack = WeightedStack (ForeignPtr WeightedStack)
 
 type instance ParentTypes WeightedStack = WeightedStackParentTypes
 type WeightedStackParentTypes = '[Fixed, Container, Widget, Object]
+instance FixedK WeightedStack
+instance ContainerK WeightedStack
+instance WidgetK WeightedStack
 
 instance GObject WeightedStack where
     gobjectIsInitiallyUnowned _ = False
@@ -136,7 +140,7 @@ weightedStackNew o s = do
   when (any ((<= 0) . snd) s) $ error
     "Yi.UI.Pango.WeightedStack.WeightedStack: all weights must be positive"
   l <- fixedNew
-  set l (fmap ((containerChild :=) . fst) s)
+  forM_ s $ containerAdd l . fst
   void $ onWidgetSizeAllocate l (relayout o s)
   unsafeCastTo WeightedStack l
 
@@ -231,6 +235,9 @@ newtype SlidingPair = SlidingPair (ForeignPtr SlidingPair)
 
 type instance ParentTypes SlidingPair = SlidingPairParentTypes
 type SlidingPairParentTypes = '[Paned, Container, Widget, Object]
+instance PanedK SlidingPair
+instance ContainerK SlidingPair
+instance WidgetK SlidingPair
 
 instance GObject SlidingPair where
     gobjectIsInitiallyUnowned _ = False
@@ -280,7 +287,7 @@ is also no need to correct the slider position.
           when (oldPos /= newPos) $ handleNewPos newPos
         else -- the size was changed; restore the slider position and
              -- save the new position
-          set p [ panedPosition := round (oldPos * fromIntegral sz) ]
+          setPanedPosition p $ round (oldPos * fromIntegral sz)
 
   unsafeCastTo SlidingPair p
 
@@ -344,7 +351,7 @@ layoutDisplaySet ld lyt = do
   let applyLayout = do
         impl' <- buildImpl (runCb $ dividerCallbacks ld) lyt
         widgetShowAll =<< outerWidget impl'
-        set (mainWidget ld) [containerChild :=> outerWidget impl']
+        setContainerChild (mainWidget ld) =<< outerWidget impl'
         writeIORef (implWidget ld) (Just impl')
 
   case mimpl of

@@ -81,13 +81,13 @@ import GI.Gtk
         scrolledWindowSetPolicy, scrolledWindowAddWithViewport,
         noAdjustment, scrolledWindowNew, widgetModifyBg, iMContextFocusIn,
         iMContextSetClientWindow, setLabelLabel, getLabelLabel,
-        widgetAddEvents, drawingAreaNew, widgetSetSizeRequest, miscXalign,
+        widgetAddEvents, drawingAreaNew, widgetSetSizeRequest, setMiscXalign,
         labelNew, toWidget, widgetGetWindow, widgetIsFocus, widgetShowAll,
         boxPackEnd, Label(..), onWidgetKeyPressEvent, onWidgetDeleteEvent,
         labelSetSingleLineMode, containerGetChildren,
         statusbarGetMessageArea, statusbarNew, panedAdd2, hPanedNew,
-        mainQuit, containerChild, windowIcon, windowTitle,
-        windowDefaultHeight, windowDefaultWidth, onIMContextCommit,
+        mainQuit, setContainerChild, setWindowIcon, setWindowTitle,
+        setWindowDefaultHeight, setWindowDefaultWidth, onIMContextCommit,
         iMContextSetUsePreedit, iMMulticontextNew, vBoxNew, windowNew,
         widgetModifyFont, windowIconify, DrawingArea, Widget, IMContext,
         Statusbar)
@@ -272,12 +272,11 @@ startNoMsgGtkHook userHook cfg ch outCh ed = do
   -- Yi.Buffer.Misc.insertN for atomic input?
   onIMContextCommit im $ mapM_ (\k -> ch [Event (KASCII k) []]) . T.unpack
 
-  set win [ windowDefaultWidth  := 700
-          , windowDefaultHeight := 900
-          , windowTitle         := ("Yi" :: T.Text)
-          , windowIcon          := ico
-          , containerChild      := vb
-          ]
+  setWindowDefaultWidth  win 700
+  setWindowDefaultHeight win 900
+  setWindowTitle         win "Yi"
+  setWindowIcon          win ico
+  setContainerChild      win vb
 
   onWidgetDeleteEvent win $ \_ -> mainQuit >> return True
   onWidgetKeyPressEvent win $ handleKeypress ch im

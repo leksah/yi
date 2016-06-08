@@ -94,7 +94,7 @@ import GI.Gtk
         drawingAreaNew, ScrolledWindow, DrawingArea, widgetSetSizeRequest,
         widgetQueueDraw, mainQuit)
 import qualified GI.Gtk as Gtk
-       (widgetCanFocus, widgetAddEvents, widgetGetAllocatedHeight,
+       (setWidgetCanFocus, widgetAddEvents, widgetGetAllocatedHeight,
         widgetGetAllocatedWidth)
 import GI.Pango
        (attrListInsert, attrListNew, AttrList, attrWeightNew,
@@ -586,7 +586,7 @@ newView buffer font = do
     let view = View {..}
 
     liftBase $ Gtk.widgetAddEvents drawArea (gflagsToWord [EventMaskKeyPressMask])
-    liftBase $ Gtk.set drawArea [Gtk.widgetCanFocus := True]
+    liftBase $ Gtk.setWidgetCanFocus drawArea True
 
     liftBase $ onWidgetKeyPressEvent drawArea $ \e -> do
         -- putStrLn $ "Yi Control Key Press = " <> show event
