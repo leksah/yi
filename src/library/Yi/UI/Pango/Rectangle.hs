@@ -18,42 +18,55 @@
 module Yi.UI.Pango.Rectangle (
     Rectangle(..)
 ,   newRectangle
-,   rectangleWidth
-,   rectangleHeight
-,   rectangleX
-,   rectangleY
-,   rectangleReadWidth
-,   rectangleReadHeight
-,   rectangleReadX
-,   rectangleReadY
+,   setRectangleWidth
+,   setRectangleHeight
+,   setRectangleX
+,   setRectangleY
+,   getRectangleWidth
+,   getRectangleHeight
+,   getRectangleX
+,   getRectangleY
 ) where
 
+import Data.Int (Int32)
 import Data.GI.Base (new, AttrOp)
 import Data.GI.Base.Attributes (AttrOpTag(..))
 #ifdef MIN_VERSION_GDK_3_18
-import GI.Gdk (Rectangle(..), rectangleWidth, rectangleHeight, rectangleX, rectangleY, rectangleReadWidth, rectangleReadHeight, rectangleReadX, rectangleReadY)
+import GI.Gdk (Rectangle(..), getRectangleWidth, getRectangleHeight, getRectangleX, getRectangleY,
+                              setRectangleWidth, setRectangleHeight, setRectangleX, setRectangleY)
 #else
-import Data.Int (Int32)
-import GI.Cairo (RectangleInt(..), rectangleIntWidth, rectangleIntHeight, rectangleIntX, rectangleIntY, rectangleIntReadWidth, rectangleIntReadHeight, rectangleIntReadX, rectangleIntReadY)
+import GI.Cairo (RectangleInt(..), getRectangleIntWidth, getRectangleIntHeight, getRectangleIntX, getRectangleIntY,
+                                   setRectangleIntWidth, setRectangleIntHeight, setRectangleIntX, setRectangleIntY)
 #endif
 
 #ifdef MIN_VERSION_GDK_3_18
-newRectangle :: [AttrOp Rectangle AttrSet] -> IO Rectangle
-newRectangle = new Rectangle
+rectangle = Rectangle
 #else
 type Rectangle      = RectangleInt
-rectangleWidth      = rectangleIntWidth
-rectangleHeight     = rectangleIntHeight
-rectangleX          = rectangleIntX
-rectangleY          = rectangleIntY
-rectangleReadWidth :: Rectangle -> IO Int32
-rectangleReadWidth  = rectangleIntReadWidth
-rectangleReadHeight :: Rectangle -> IO Int32
-rectangleReadHeight = rectangleIntReadHeight
-rectangleReadX :: Rectangle -> IO Int32
-rectangleReadX      = rectangleIntReadX
-rectangleReadY :: Rectangle -> IO Int32
-rectangleReadY      = rectangleIntReadY
-newRectangle :: [AttrOp Rectangle AttrSet] -> IO Rectangle
-newRectangle = new RectangleInt
+rectangle           = RectangleInt
+getRectangleWidth :: Rectangle -> IO Int32
+getRectangleWidth  = getRectangleIntWidth
+getRectangleHeight :: Rectangle -> IO Int32
+getRectangleHeight = getRectangleIntHeight
+getRectangleX :: Rectangle -> IO Int32
+getRectangleX      = getRectangleIntX
+getRectangleY :: Rectangle -> IO Int32
+getRectangleY      = getRectangleIntY
+setRectangleWidth :: Rectangle -> Int32 -> IO ()
+setRectangleWidth  = setRectangleIntWidth
+setRectangleHeight :: Rectangle -> Int32 -> IO ()
+setRectangleHeight = setRectangleIntHeight
+setRectangleX :: Rectangle -> Int32 -> IO ()
+setRectangleX      = setRectangleIntX
+setRectangleY :: Rectangle -> Int32 -> IO ()
+setRectangleY      = setRectangleIntY
 #endif
+
+newRectangle :: Int32 -> Int32 -> Int32 -> Int32 -> IO Rectangle
+newRectangle x y width height = do
+    r <- new rectangle []
+    setRectangleX      r x
+    setRectangleY      r y
+    setRectangleWidth  r width
+    setRectangleHeight r height
+    return r    

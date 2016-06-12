@@ -92,7 +92,7 @@ import GI.Gtk
         widgetModifyFont, windowIconify, DrawingArea, Widget, IMContext,
         Statusbar)
 import GI.Pango
-       (rectangleReadWidth, rectangleReadX, layoutNew, WrapMode,
+       (getRectangleWidth, getRectangleX, layoutNew, WrapMode,
         layoutXyToIndex, fontMetricsGetApproximateDigitWidth,
         fontMetricsGetApproximateCharWidth, fontMetricsGetDescent,
         fontMetricsGetAscent, layoutSetWidth, layoutGetWidth,
@@ -102,7 +102,7 @@ import GI.Pango
         fontDescriptionToString, layoutIndexToPos, layoutGetCursorPos,
         layoutSetAttributes, attrWeightNew, attrUnderlineNew, attrStyleNew,
         attrBackgroundNew, attrForegroundNew, attrListInsert,
-        attributeEndIndex, attributeStartIndex, Attribute, attrListNew,
+        setAttributeEndIndex, setAttributeStartIndex, Attribute, attrListNew,
         AttrList, layoutSetText, contextGetMetrics, contextGetLanguage,
         fontDescriptionFromString, fontDescriptionNew,
         layoutSetFontDescription, fontDescriptionSetFamily, Layout,
@@ -122,16 +122,14 @@ import GI.Pango.Enums
        (WrapMode(..), Weight(..), Underline(..), Style(..))
 import GI.PangoCairo (showLayout)
 import GI.Gdk
-       (eventMotionReadY, eventMotionReadX, EventMotion, EventConfigure,
-        eventScrollReadY, eventScrollReadX, eventScrollReadDirection,
-        EventScroll, atomIntern, eventButtonReadButton,
-        eventButtonReadType, eventButtonReadY, eventButtonReadX,
+       (getEventMotionY, getEventMotionX, EventMotion, EventConfigure,
+        getEventScrollY, getEventScrollX, getEventScrollDirection,
+        EventScroll, atomIntern, getEventButtonButton,
+        getEventButtonType, getEventButtonY, getEventButtonX,
         EventButton, ModifierType, keyvalToUnicode, keyvalName,
-        eventKeyReadKeyval, eventKeyReadState, EventKey,
-        colorBlue, colorGreen, colorRed)
+        getEventKeyKeyval, getEventKeyState, EventKey)
 import Yi.UI.Pango.Rectangle
-        (rectangleY, rectangleX, Rectangle(..), rectangleHeight,
-        rectangleWidth, newRectangle)
+        (Rectangle(..), newRectangle)
 import qualified Graphics.Rendering.Cairo as Cairo
        (setSourceRGB, stroke, rectangle, lineTo, moveTo, setLineWidth)
 import Data.Word (Word16)
@@ -141,8 +139,8 @@ import qualified Graphics.Rendering.Cairo.Internal as Cairo
        (Render(..))
 import Control.Monad.Reader (MonadIO)
 import qualified GI.Pango as Pango
-       (rectangleReadHeight, rectangleReadWidth, rectangleReadY,
-        rectangleReadX)
+       (getRectangleHeight, getRectangleWidth, getRectangleY,
+        getRectangleX)
 import GI.Gdk.Enums (ScrollDirection(..), EventType(..))
 import Graphics.Rendering.Cairo.Matrix (Matrix(..))
 import GI.Gdk.Constants (pattern BUTTON_MIDDLE, pattern BUTTON_PRIMARY)
@@ -593,10 +591,8 @@ render ui w context =
             let atr :: MonadIO m => m Attribute -> m ()
                 atr newAttr = do
                     a <- newAttr
-                    Gtk.set a
-                        [ attributeStartIndex := rel p1
-                        , attributeEndIndex := rel p2
-                        ]
+                    setAttributeStartIndex a $ rel p1
+                    setAttributeEndIndex a $ rel p2
                     attrListInsert list a
             let if' p x y = if p then x else y
             mapM_ atr
@@ -631,16 +627,11 @@ render ui w context =
 
     -- (PangoRectangle (succ -> curX) curY curW curH, _) <-
     (r, _) <- layoutGetCursorPos layout (rel cur)
-    curX <- succ . fromPango <$> Pango.rectangleReadX r
-    curY <- fromPango <$> Pango.rectangleReadY r
-    curW <- fromPango <$> Pango.rectangleReadWidth r
-    curH <- fromPango <$> Pango.rectangleReadHeight r
-    gdkRectangle <- newRectangle
-        [ rectangleX := round curX
-        , rectangleY := round curY
-        , rectangleWidth := round curW
-        , rectangleHeight := round curH
-        ]
+    curX <- succ . fromPango <$> Pango.getRectangleX r
+    curY <- fromPango <$> Pango.getRectangleY r
+    curW <- fromPango <$> Pango.getRectangleWidth r
+    curH <- fromPango <$> Pango.getRectangleHeight r
+    gdkRectangle <- newRectangle (round curX) (round curY) (round curW) (round curH)
     -- tell the input method
     iMContextSetCursorLocation (uiInput ui) gdkRectangle
     -- paint the cursor
@@ -659,10 +650,10 @@ render ui w context =
               Cairo.lineTo (curX + curW) (curY + curH)
             else do -- if we aren't inserting, we want a rectangle around the current character
               r <- layoutIndexToPos layout (rel cur)
-              chx <- succ . fromPango <$> Pango.rectangleReadX r
-              chy <- fromPango <$> Pango.rectangleReadY r
-              chw <- fromPango <$> Pango.rectangleReadWidth r
-              chh <- fromPango <$> Pango.rectangleReadHeight r
+              chx <- succ . fromPango <$> Pango.getRectangleX r
+              chy <- fromPango <$> Pango.getRectangleY r
+              chw <- fromPango <$> Pango.getRectangleWidth r
+              chh <- fromPango <$> Pango.getRectangleHeight r
               Cairo.rectangle chx chy (if chw > 0 then chw else 8) chh
           Cairo.stroke
 
@@ -809,8 +800,8 @@ updatePango ui font w b layout = do
     then wrapToWidth layout WrapModeChar (fromIntegral width')
     else do
     (r, _) <- layoutGetPixelExtents layout
-    px <- rectangleReadX r
-    pwidth <- rectangleReadWidth r
+    px <- getRectangleX r
+    pwidth <- getRectangleWidth r
     widgetSetSizeRequest (textview w) (px+pwidth) (-1)
 
   (_, bosOffset, _) <- layoutXyToIndex layout (width' * pangoScale)
@@ -883,8 +874,8 @@ handleKeypress :: ([Event] -> IO ()) -- ^ Event dispatcher (Yi.Core.dispatch)
                -> EventKey
                -> IO Bool
 handleKeypress ch im e = do
-  gtkMods <- eventKeyReadState e
-  gtkKey  <- eventKeyReadKeyval e
+  gtkMods <- getEventKeyState e
+  gtkKey  <- getEventKeyKeyval e
   name    <- keyvalName gtkKey
   char    <- toEnum . fromIntegral <$> keyvalToUnicode gtkKey
   ifIM    <- iMContextFilterKeypress im e
@@ -918,10 +909,10 @@ modTable = M.fromList
 
 handleButtonClick :: UI -> WindowRef -> EventButton -> IO Bool
 handleButtonClick ui ref e = do
-  x <- eventButtonReadX e
-  y <- eventButtonReadY e
-  click <- eventButtonReadType e
-  button <- eventButtonReadButton e
+  x <- getEventButtonX e
+  y <- getEventButtonY e
+  click <- getEventButtonType e
+  button <- getEventButtonButton e
   io $ do
     w <- getWinInfo ui ref
     point <- pointToOffset (x, y) w
@@ -957,9 +948,9 @@ handleButtonClick ui ref e = do
 
 handleButtonRelease :: UI -> WinInfo -> EventButton -> IO Bool
 handleButtonRelease ui w e = do
-  x <- eventButtonReadX e
-  y <- eventButtonReadY e
-  button <- eventButtonReadButton e
+  x <- getEventButtonX e
+  y <- getEventButtonY e
+  button <- getEventButtonButton e
   io $ do
     point <- pointToOffset (x, y) w
     disp  <- widgetGetDisplay $ textview w
@@ -973,9 +964,9 @@ handleButtonRelease ui w e = do
 
 handleScroll :: UI -> WinInfo -> EventScroll -> IO Bool
 handleScroll ui w e = do
-  scrollDirection <- eventScrollReadDirection e
-  x <- eventScrollReadX e
-  y <- eventScrollReadY e
+  scrollDirection <- getEventScrollDirection e
+  x <- getEventScrollX e
+  y <- getEventScrollY e
   io $ do
     ifPressed <- readIORef $ lButtonPressed w
     -- query new coordinates
@@ -998,8 +989,8 @@ handleConfigure ui e = do
 
 handleMove :: UI -> WinInfo -> EventMotion -> IO Bool
 handleMove ui w e = do
-  x <- eventMotionReadX e
-  y <- eventMotionReadY e
+  x <- getEventMotionX e
+  y <- getEventMotionY e
   selectArea ui w (x,y)
   return True
 

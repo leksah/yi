@@ -68,14 +68,13 @@ import Data.GI.Base.Attributes
        (AttrLabelProxy(..), get, AttrOp(..))
 import qualified Data.GI.Base.Signals as Gtk (on)
 import GI.Gtk.Structs.Requisition
-       (requisitionHeight, requisitionWidth, requisitionReadHeight,
-        requisitionReadWidth, Requisition(..))
+       (setRequisitionHeight, setRequisitionWidth, getRequisitionHeight,
+        getRequisitionWidth, Requisition(..))
 import GI.Gdk.Objects.Screen
        (screenGetHeight, screenGetWidth, screenGetDefault)
 import Yi.UI.Pango.Rectangle
-       (rectangleReadHeight, rectangleReadWidth, rectangleReadY,
-        rectangleReadX, rectangleHeight, rectangleWidth, rectangleY,
-        rectangleX, Rectangle(..), newRectangle)
+       (getRectangleHeight, getRectangleWidth, getRectangleY,
+        getRectangleX, Rectangle(..), newRectangle)
 import GI.Gtk.Objects.Paned
        (getPanedPosition, panedPack2, panedPack1, toPaned,
         Paned(..), PanedK(..))
@@ -151,11 +150,11 @@ doSizeRequest o s =
     (requestAlong, requestAcross) =
       case o of
         Horizontal ->
-          (\r -> fromIntegral <$> requisitionReadWidth r,
-           requisitionReadHeight)
+          (\r -> fromIntegral <$> getRequisitionWidth r,
+           getRequisitionHeight)
         Vertical ->
-          (\r -> fromIntegral <$> requisitionReadHeight r,
-           requisitionReadWidth)
+          (\r -> fromIntegral <$> getRequisitionHeight r,
+           getRequisitionWidth)
 
     totalWeight = sum . fmap snd $ s
     reqsize :: (Requisition, RelativeSize) -> IO RelativeSize
@@ -170,9 +169,15 @@ doSizeRequest o s =
     mkRequisition wr = do
       along <- round <$> sizeAlong wr
       across <- sizeAcross wr
+      req <- new Requisition []
       case o of
-        Horizontal -> new Requisition [requisitionWidth := along,  requisitionHeight := across]
-        Vertical   -> new Requisition [requisitionWidth := across, requisitionHeight := along]
+        Horizontal -> do
+            setRequisitionWidth req along
+            setRequisitionHeight req across
+        Vertical   -> do
+            setRequisitionWidth req across
+            setRequisitionHeight req along
+      return req   
     swreq (w, relSize) = (,relSize) <$> widgetSizeRequest w
   in
    boundRequisition =<< mkRequisition =<< mapM swreq s
@@ -185,19 +190,21 @@ boundRequisition r =
     mscr <- screenGetDefault
     case mscr of
       Just scr -> do
-        w <- requisitionReadWidth r
-        h <- requisitionReadHeight r
-        new Requisition [ requisitionWidth  :=> min w <$> screenGetWidth scr
-                        , requisitionHeight :=> min h <$> screenGetHeight scr ]
+        w <- getRequisitionWidth r
+        h <- getRequisitionHeight r
+        req <- new Requisition []
+        setRequisitionWidth req =<< min w <$> screenGetWidth scr
+        setRequisitionHeight req =<< min h <$> screenGetHeight scr
+        return req
       Nothing -> return r
 
 -- | Position the children appropriately for the given width and height
 relayout :: Orientation -> StackDescr -> Rectangle -> IO ()
 relayout o s r = do
-  x <- rectangleReadX r
-  y <- rectangleReadY r
-  width <- rectangleReadWidth r
-  height <- rectangleReadHeight r
+  x <- getRectangleX r
+  y <- getRectangleY r
+  width <- getRectangleWidth r
+  height <- getRectangleHeight r
   let
     totalWeight = sum . fmap snd $ s
     totalSpace = fromIntegral $
@@ -210,8 +217,8 @@ relayout o s r = do
     widgetToRectangle (round -> pos, round -> size, widget) =
       (, widget) <$>
         case o of
-          Horizontal -> newRectangle [rectangleX := pos, rectangleY := y, rectangleWidth := size, rectangleHeight := height]
-          Vertical -> newRectangle [rectangleX := x, rectangleY := pos, rectangleWidth := width, rectangleHeight := size]
+          Horizontal -> newRectangle pos y size height
+          Vertical -> newRectangle x pos width size
     startPosition = fromIntegral $
       case o of
         Horizontal -> x
@@ -269,8 +276,8 @@ is also no need to correct the slider position.
 
   void $ onWidgetSizeAllocate p $ \r ->
     do
-      w <- rectangleReadWidth r
-      h <- rectangleReadHeight r
+      w <- getRectangleWidth r
+      h <- getRectangleHeight r
       oldSz <- readIORef sizeRef
       oldPos <- readIORef posRef
 

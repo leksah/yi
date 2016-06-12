@@ -99,8 +99,8 @@ import qualified GI.Gtk as Gtk
 import GI.Pango
        (attrListInsert, attrListNew, AttrList, attrWeightNew,
         attrUnderlineNew, attrStyleNew, attrBackgroundNew,
-        attrForegroundNew, attributeEndIndex, attributeStartIndex,
-        attrClassType, AttrClass(..), attributeKlass, Attribute(..), Color,
+        attrForegroundNew, setAttributeEndIndex, setAttributeStartIndex,
+        AttrClass(..), Attribute(..), Color,
         layoutIndexToPos, layoutGetCursorPos, layoutSetAttributes,
         layoutNew, contextGetMetrics, contextGetLanguage,
         layoutSetFontDescription, layoutXyToIndex, Layout,
@@ -110,11 +110,11 @@ import GI.Pango
         layoutSetWidth, layoutGetWidth, layoutGetFontDescription)
 import GI.Gdk
        (keyvalToUnicode, keyvalName, EventKey, atomIntern, pattern BUTTON_MIDDLE,
-        eventMotionReadY, eventMotionReadX, pattern BUTTON_PRIMARY, EventType,
-        colorBlue, colorGreen, colorRed, eventScrollReadDirection,
-        eventButtonReadButton, eventButtonReadType, eventButtonReadY,
-        eventButtonReadX)
-import Yi.UI.Pango.Rectangle (rectangleReadWidth, rectangleReadX, Rectangle)
+        getEventMotionY, getEventMotionX, pattern BUTTON_PRIMARY, EventType,
+        setColorBlue, setColorGreen, setColorRed, getEventScrollDirection,
+        getEventButtonButton, getEventButtonType, getEventButtonY,
+        getEventButtonX)
+import Yi.UI.Pango.Rectangle (getRectangleWidth, getRectangleX, Rectangle)
 import GI.Gtk.Enums (PolicyType(..), StateType(..))
 import Data.GI.Base.Signals (SignalHandlerId)
 import GI.Gdk.Flags (EventMask(..))
@@ -125,14 +125,14 @@ import GI.Pango.Enums
 import GI.PangoCairo (showLayout)
 import GI.Cairo (Context(..))
 import qualified GI.Pango as Pango
-       (rectangleReadHeight, rectangleReadWidth, rectangleReadY,
-        rectangleReadX, Rectangle)
+       (getRectangleHeight, getRectangleWidth, getRectangleY,
+        getRectangleX, Rectangle)
 import Graphics.Rendering.Cairo.Types (Cairo(..))
 import Graphics.Rendering.Cairo (setLineWidth)
 import qualified Graphics.Rendering.Cairo as Cairo
        (setLineWidth, setSourceRGB, stroke, rectangle, lineTo, moveTo)
 import qualified GI.Gdk as Gtk
-       (ModifierType, eventKeyReadState, eventKeyReadKeyval,
+       (ModifierType, getEventKeyState, getEventKeyKeyval,
         ScrollDirection, Color(..))
 import qualified Graphics.Rendering.Cairo.Internal as Cairo
        (Render(..))
@@ -375,8 +375,8 @@ updatePango e v b layout = do
               liftBase $ layoutSetWidth layout width''
     else liftBase $ do
       (r, _) <- layoutGetPixelExtents layout
-      px <- Pango.rectangleReadX r
-      pwidth <- Pango.rectangleReadWidth r
+      px <- Pango.getRectangleX r
+      pwidth <- Pango.getRectangleWidth r
       widgetSetSizeRequest (drawArea v) (px+pwidth) (-1)
 
   -- optimize for cursor movement
@@ -598,23 +598,23 @@ newView buffer font = do
         return result
 
     liftBase $ onWidgetButtonPressEvent drawArea $ \e -> do
-        x <- eventButtonReadX e
-        y <- eventButtonReadY e
-        click <- eventButtonReadType e
-        button <- eventButtonReadButton e
+        x <- getEventButtonX e
+        y <- getEventButtonY e
+        click <- getEventButtonType e
+        button <- getEventButtonButton e
         liftBase $ do
             widgetGrabFocus drawArea
             runControl (handleClick view x y click button) control
 
     liftBase $ onWidgetButtonReleaseEvent drawArea $ \e -> do
-        x <- eventButtonReadX e
-        y <- eventButtonReadY e
-        click <- eventButtonReadType e
-        button <- eventButtonReadButton e
+        x <- getEventButtonX e
+        y <- getEventButtonY e
+        click <- getEventButtonType e
+        button <- getEventButtonButton e
         liftBase $ runControl (handleClick view x y click button) control
 
     liftBase $ onWidgetScrollEvent drawArea $ \e -> do
-        direction <- eventScrollReadDirection e
+        direction <- getEventScrollDirection e
         liftBase $ runControl (handleScroll view direction) control
 
     liftBase $ onWidgetDraw drawArea $ \context -> do
@@ -666,10 +666,8 @@ newView buffer font = do
                         let atr :: MonadIO m => m Attribute -> m ()
                             atr newAttr = do
                                 a <- newAttr
-                                Gtk.set a
-                                    [ attributeStartIndex := rel p1
-                                    , attributeEndIndex := rel p2
-                                    ]
+                                setAttributeStartIndex a $ rel p1
+                                setAttributeEndIndex a $ rel p2
                                 attrListInsert list a
                         let if' p x y = if p then x else y
                         mapM_ atr
@@ -699,15 +697,15 @@ newView buffer font = do
 
         -- paint the cursor
         (curRect, _) <- layoutGetCursorPos layout (rel point)
-        curx <- Pango.rectangleReadX curRect
-        cury <- Pango.rectangleReadY curRect
-        curw <- Pango.rectangleReadWidth curRect
-        curh <- Pango.rectangleReadHeight curRect
+        curx <- Pango.getRectangleX curRect
+        cury <- Pango.getRectangleY curRect
+        curw <- Pango.getRectangleWidth curRect
+        curh <- Pango.getRectangleHeight curRect
         chRect <- liftIO $ layoutIndexToPos layout (rel point)
-        chx <- Pango.rectangleReadX chRect
-        chy <- Pango.rectangleReadY chRect
-        chw <- Pango.rectangleReadWidth chRect
-        chh <- Pango.rectangleReadHeight chRect
+        chx <- Pango.getRectangleX chRect
+        chy <- Pango.getRectangleY chRect
+        chw <- Pango.getRectangleWidth chRect
+        chh <- Pango.getRectangleHeight chRect
 
         -- gcSetValues gc (newGCValues { Gtk.foreground = newForeground $ Yi.Style.foreground $ baseAttributes $ configStyle $ configUI config })
         withManagedPtr context $ \cPtr -> (`runReaderT` Cairo (castPtr cPtr)) . runRender $ do
@@ -785,7 +783,12 @@ getText b Iter{point = p1} Iter{point = p2} =
   fmap toText . withBuffer b . readRegionB $ mkRegion p1 p2
 
 newColor :: MonadIO m => Word16 -> Word16 -> Word16 -> m Gtk.Color
-newColor r g b = new Gtk.Color [colorRed := r, colorGreen := g, colorBlue := b]
+newColor r g b = do
+    c <- new Gtk.Color []
+    setColorRed c r
+    setColorGreen c g
+    setColorBlue c b
+    return c
 
 newForeground, newBackground :: MonadIO m => Yi.Style.Color -> m Gtk.Color
 newForeground = yiForeground newColor
@@ -833,8 +836,8 @@ handleClick view x y click button = do
   liftBase $ case (click, fromIntegral button) of
      (EventTypeButtonPress, BUTTON_PRIMARY) -> do
         cid <- onWidgetMotionNotifyEvent (drawArea view) $ \e -> do
-            x <- eventMotionReadX e
-            y <- eventMotionReadY e
+            x <- getEventMotionX e
+            y <- getEventMotionY e
             liftBase $ runControl (handleMove view p1 x y) control
         writeIORef (winMotionSignal view) $ Just cid
 
@@ -925,9 +928,9 @@ processKeyEvent :: ([Event] -> IO ()) -> EventKey -> IO Bool
 processKeyEvent ch ev = do
   -- logPutStrLn $ "Gtk.Event: " <> show ev
   -- logPutStrLn $ "Event: " <> show (gtkToYiEvent ev)
-  keyval <- Gtk.eventKeyReadKeyval ev
+  keyval <- Gtk.getEventKeyKeyval ev
   name   <- keyvalName keyval
-  mod    <- Gtk.eventKeyReadState ev
+  mod    <- Gtk.getEventKeyState ev
   char   <- toEnum . fromIntegral <$> keyvalToUnicode keyval
   case gtkToYiEvent name mod char of
     Nothing -> logPutStrLn $ "Event not translatable: " <> showT (name, mod, char)
