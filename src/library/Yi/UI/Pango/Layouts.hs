@@ -56,14 +56,14 @@ import           Prelude hiding (mapM)
 import           Yi.Layout(Orientation(..), RelativeSize, DividerPosition,
                            Layout(..), DividerRef)
 import GI.Gtk.Objects.Widget
-       (WidgetK(..), onWidgetSizeAllocate, toWidget, widgetShowAll,
+       (IsWidget(..), onWidgetSizeAllocate, toWidget, widgetShowAll,
         widgetSizeAllocate, widgetSizeRequest, Widget(..))
-import GI.Gtk.Objects.Fixed (fixedNew, Fixed(..), FixedK(..))
+import GI.Gtk.Objects.Fixed (fixedNew, Fixed(..), IsFixed(..))
 import Data.GI.Base
        (unsafeManagedPtrGetPtr, unsafeCastTo, GObject, castTo, set)
 import GI.Gtk.Objects.Container
        (containerRemove, Container(..), toContainer,
-        ContainerK(..))
+        IsContainer(..))
 import Data.GI.Base.Attributes
        (AttrLabelProxy(..), get, AttrOp(..))
 import qualified Data.GI.Base.Signals as Gtk (on)
@@ -77,7 +77,7 @@ import Yi.UI.Pango.Rectangle
         getRectangleX, Rectangle(..), newRectangle)
 import GI.Gtk.Objects.Paned
        (getPanedPosition, panedPack2, panedPack1, toPaned,
-        Paned(..), PanedK(..))
+        Paned(..), IsPaned(..))
 import GI.Gtk.Objects.HPaned (hPanedNew)
 import GI.Gtk.Objects.VPaned (vPanedNew)
 import GI.Gtk.Objects.Bin (toBin, Bin(..))
@@ -124,9 +124,9 @@ newtype WeightedStack = WeightedStack (ForeignPtr WeightedStack)
 
 type instance ParentTypes WeightedStack = WeightedStackParentTypes
 type WeightedStackParentTypes = '[Fixed, Container, Widget, Object]
-instance FixedK WeightedStack
-instance ContainerK WeightedStack
-instance WidgetK WeightedStack
+instance IsFixed WeightedStack
+instance IsContainer WeightedStack
+instance IsWidget WeightedStack
 
 instance GObject WeightedStack where
     gobjectIsInitiallyUnowned _ = False
@@ -177,7 +177,7 @@ doSizeRequest o s =
         Vertical   -> do
             setRequisitionWidth req across
             setRequisitionHeight req along
-      return req   
+      return req
     swreq (w, relSize) = (,relSize) <$> widgetSizeRequest w
   in
    boundRequisition =<< mkRequisition =<< mapM swreq s
@@ -239,18 +239,15 @@ constant even when resizing.
 -}
 
 newtype SlidingPair = SlidingPair (ForeignPtr SlidingPair)
-
-type instance ParentTypes SlidingPair = SlidingPairParentTypes
-type SlidingPairParentTypes = '[Paned, Container, Widget, Object]
-instance PanedK SlidingPair
-instance ContainerK SlidingPair
-instance WidgetK SlidingPair
+instance IsPaned SlidingPair
+instance IsContainer SlidingPair
+instance IsWidget SlidingPair
 
 instance GObject SlidingPair where
     gobjectIsInitiallyUnowned _ = False
     gobjectType _ = gobjectType (undefined :: Paned)
 
-slidingPairNew :: (WidgetK w1, WidgetK w2) => Orientation -> w1 -> w2
+slidingPairNew :: (IsWidget w1, IsWidget w2) => Orientation -> w1 -> w2
                -> DividerPosition
                -> (DividerPosition -> IO ())
                -> IO SlidingPair

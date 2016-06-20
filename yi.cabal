@@ -342,15 +342,15 @@ library
       Yi.UI.Pango.Rectangle
     build-depends:
       cairo           >= 0.13   && < 0.14,
-      haskell-gi-base >= 0.17   && < 0.18,
-      gi-glib         >= 2.0.2  && < 2.1,
-      gi-gobject      >= 2.0.2  && < 2.1,
-      gi-gdkpixbuf    >= 2.0.2  && < 2.1,
-      gi-gdk          >= 3.0.2  && < 3.1,
-      gi-gtk          >= 3.0.2  && < 3.1,
-      gi-pango        >= 1.0.2  && < 1.1,
-      gi-cairo        >= 1.0.2  && < 1.1,
-      gi-pangocairo   >= 1.0.2  && < 1.1
+      haskell-gi-base >= 0.18   && < 0.19,
+      gi-glib         >= 2.0.6  && < 2.1,
+      gi-gobject      >= 2.0.6  && < 2.1,
+      gi-gdkpixbuf    >= 2.0.6  && < 2.1,
+      gi-gdk          >= 3.0.6  && < 3.1,
+      gi-gtk          >= 3.0.6  && < 3.1,
+      gi-pango        >= 1.0.6  && < 1.1,
+      gi-cairo        >= 1.0.6  && < 1.1,
+      gi-pangocairo   >= 1.0.6  && < 1.1
     cpp-options: -DFRONTEND_PANGO
 
   if flag(vty)
